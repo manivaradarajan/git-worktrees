@@ -5,6 +5,12 @@
 # HOME, then exercises the fish functions and git plan against the sandbox.
 # Fails (nonzero) if any assertion fails. Safe to run anywhere; cleans up.
 #
+# Coverage: start / idempotent restart / multi-repo / missing-repo preflight /
+# invalid idea / bogus destination / go / git plan / merge refusals / coordinated
+# merge / stop+resume / rm / shared python venv (union resolution, auto-activation,
+# pip fallback, python3 fast-fail) / environment fast-fail guards. All installs
+# are offline (manifests are dependency-free).
+#
 # Usage:   ./test.sh
 # no `-e` on purpose: run_fish + ok/fail manage status explicitly; `-e` would
 # abort mid-harness on the first expected failure.
@@ -55,6 +61,36 @@ for r in repo-a repo-b; do
     git -C "$GITHUB_HOME/$r" add -A
     git -C "$GITHUB_HOME/$r" commit -qm base
 done
+
+# python repos for shared-venv coverage — manifests are dependency-free so all
+# installs are offline and instant
+for r in repo-req repo-req2 repo-py; do
+    git init -q -b main "$GITHUB_HOME/$r"
+    git -C "$GITHUB_HOME/$r" config user.email t@t
+    git -C "$GITHUB_HOME/$r" config user.name t
+    echo base > "$GITHUB_HOME/$r/base.txt"
+    git -C "$GITHUB_HOME/$r" add -A
+    git -C "$GITHUB_HOME/$r" commit -qm base
+done
+# repo-req / repo-req2 -> requirements.txt only; repo-py -> BOTH pyproject.toml
+# and requirements.txt (pyproject must win the union resolution)
+echo '# offline: no deps' > "$GITHUB_HOME/repo-req/requirements.txt"
+echo '# offline: no deps' > "$GITHUB_HOME/repo-req2/requirements.txt"
+echo '# offline: no deps' > "$GITHUB_HOME/repo-py/requirements.txt"
+cat > "$GITHUB_HOME/repo-py/pyproject.toml" <<'EOF'
+[project]
+name = "testpkg"
+version = "0.0.1"
+dependencies = []
+EOF
+for r in repo-req repo-req2 repo-py; do
+    git -C "$GITHUB_HOME/$r" add -A
+    git -C "$GITHUB_HOME/$r" commit -qm python-manifests
+done
+
+# a PATH dir with git but NO python3/uv, for the python3 fast-fail test
+export WT_TESTBIN="$WORK/testbin"; mkdir -p "$WT_TESTBIN"
+ln -sf /usr/bin/git "$WT_TESTBIN/git"
 
 # registry on repo-a main so `git plan` has a row to match
 cat > "$GITHUB_HOME/repo-a/WORKTREES.md" <<EOF
@@ -173,6 +209,72 @@ run_fish "rm removes worktree and merged branch" '
     worktree-rm idea-one </dev/null >/dev/null 2>&1; or exit 1
     not test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1
     not git branch --list idea-one | string match -q "*idea-one"; or exit 1
+'
+
+echo "== shared python venv =="
+
+run_fish "pyproject wins over requirements.txt (arg resolution)" '
+    set -l args (__wt_venv_args repo-py)
+    contains -- -e $args; or exit 1
+    contains -- "$__wt_github_home/repo-py" $args; or exit 1
+    not contains -- -r $args; or exit 1
+    not contains -- "$__wt_github_home/repo-py/requirements.txt" $args; or exit 1
+'
+
+run_fish "union venv from multiple manifests, auto-activated on cd" '
+    cd "$__wt_github_home/repo-req"
+    worktree-start --repos=repo-req,repo-req2 idea-python >/dev/null 2>&1; or exit 1
+    test -d "$__wt_venv_home/idea-python"; or exit 1
+    test -x "$__wt_venv_home/idea-python/bin/python"; or exit 1
+    test -n "$VIRTUAL_ENV"; or exit 1
+'
+
+run_fish "venv deactivates on leaving, swaps on idea switch, works in subdirs" '
+    cd "$__wt_worktree_home/repo-req/idea-python"
+    test -n "$VIRTUAL_ENV"; or exit 1
+    mkdir -p "$__wt_worktree_home/repo-req/idea-python/sub"
+    cd "$__wt_worktree_home/repo-req/idea-python/sub"
+    test -n "$VIRTUAL_ENV"; or exit 1
+    cd "$__wt_github_home/repo-req"
+    test -z "$VIRTUAL_ENV"; or exit 1
+    worktree-start --repos=repo-req idea-python2 >/dev/null 2>&1; or exit 1
+    cd "$__wt_worktree_home/repo-req/idea-python"
+    test -n "$VIRTUAL_ENV"; or exit 1
+    cd "$__wt_worktree_home/repo-req/idea-python2"
+    string match -q "*idea-python2" "$VIRTUAL_ENV"; or exit 1
+'
+
+run_fish "worktree-venv prints the venv path" '
+    cd "$__wt_github_home/repo-req"
+    set -l out (worktree-venv --repos=repo-req idea-python2 2>/dev/null)
+    string match -q "*idea-python2" $out; or exit 1
+'
+
+run_fish "stop keeps venv, rm removes it" '
+    cd "$__wt_github_home/repo-req"
+    worktree-stop --repos=repo-req,repo-req2 idea-python >/dev/null 2>&1; or exit 1
+    test -d "$__wt_venv_home/idea-python"; or exit 1
+    worktree-rm --repos=repo-req,repo-req2 idea-python </dev/null >/dev/null 2>&1; or exit 1
+    not test -d "$__wt_venv_home/idea-python"; or exit 1
+'
+
+run_fish "pip fallback creates venv when uv absent" '
+    cd "$__wt_github_home/repo-req"
+    set -gx PATH /usr/bin:/usr/local/bin
+    command -sq uv; and exit 1
+    worktree-start --repos=repo-req idea-pip >/dev/null 2>&1; or exit 1
+    test -d "$__wt_venv_home/idea-pip"; or exit 1
+    test -x "$__wt_venv_home/idea-pip/bin/python"; or exit 1
+    test -x "$__wt_venv_home/idea-pip/bin/pip"; or exit 1
+'
+
+run_fish "python3 missing fast-fails phase 0 (nothing created)" '
+    cd "$__wt_github_home/repo-req"
+    set -gx PATH "$WT_TESTBIN:/usr/local/bin:/bin:/usr/sbin"
+    command -sq python3; and exit 1
+    worktree-start --repos=repo-req,repo-req2 idea-nopython >/dev/null 2>&1; and exit 1
+    not test -d "$__wt_venv_home/idea-nopython"; or exit 1
+    not test -d "$__wt_worktree_home/repo-req/idea-nopython"; or exit 1
 '
 
 echo "== environment fast-fail =="

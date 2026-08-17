@@ -26,16 +26,23 @@ metadata; nothing is fetched, pushed, or committed automatically.
 ```
 $__wt_github_home/<repo>            main clones   (default: ~/github)
 $__wt_worktree_home/<repo>/<idea>   worktrees     (default: ~/git-worktrees)
+$__wt_worktree_home/.venvs/<idea>   shared venv   (one per idea)
 $__wt_worktree_home/WORKTREE-GROUPS named repo groups
 ```
 
 Both homes are configurable. `configure.sh` writes an override that loads
 before the functions file; `worktrees.fish` itself ships with defaults only.
+`$__wt_venv_home` (default `$__wt_worktree_home/.venvs`) is where each idea's
+**shared Python venv** lives — see *Shared Python venv* below.
 
 ## Requirements
 
 - **fish ≥ 3.3** (uses the `path` builtin) and **git ≥ 2.31** (uses
   `--path-format=absolute`).
+- **`python3`** is required when any participating repo has a Python manifest
+  (`pyproject.toml` or `requirements.txt`). **`uv`** is optional: when present
+  it creates/installs the venv (fast, re-syncs every start); without it the
+  tool falls back to `python3 -m venv` + pip.
 
 The tooling **fast-fails** on unsupported environments rather than failing
 cryptically at first use:
@@ -85,11 +92,12 @@ Repo selection is mutually exclusive and defaults to the current repo only:
 
 | Command | Action |
 |---|---|
-| `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] <idea>` | Create/resume the worktree(s), cd in, run `npm install` (if `package.json` present), print paired dirs. Two-phase: validates the whole repo set before creating anything. |
-| `worktree-go <idea>` | cd into this repo's worktree, show status + registry row. |
+| `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] <idea>` | Create/resume the worktree(s), cd in, run `npm install` (if `package.json` present), provision the shared Python venv (see below), print paired dirs. Two-phase: validates the whole repo set before creating anything. |
+| `worktree-go <idea>` | cd into this repo's worktree, show status + registry row. The shared venv auto-activates. |
+| `worktree-venv [--repos=A,B,C \| -g NAME] [--force] <idea>` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. |
 | `worktree-merge [--repos=A,B,C \| -g NAME] <idea>` | Coordinated rebase-onto-local-`main` then `--ff-only` merge into each main. No push. Not a cross-repo transaction. |
 | `worktree-stop [--repos=A,B,C \| -g NAME] [--force] <idea>` | Park: remove the worktree dir, keep the branch. Refuses if dirty unless `--force`. |
-| `worktree-rm [--repos=A,B,C \| -g NAME] [--force] <idea>` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`). |
+| `worktree-rm [--repos=A,B,C \| -g NAME] [--force] <idea>` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`), then remove the shared venv. |
 | `worktree-list` | Global recall: every worktree + registry across all repos. |
 | `git plan` | Show this worktree's registry row from `main:WORKTREES.md`. |
 
@@ -108,10 +116,37 @@ develop/commit -> worktree-merge -> worktree-stop (park) | worktree-rm (teardown
 - `worktree-start` is idempotent: existing worktree -> just cd; parked branch ->
   re-attach; missing -> create off `main`.
 - `worktree-stop` keeps the branch (resume later with `start`); `worktree-rm`
-  deletes it (done forever).
+  deletes it (done forever) and removes the idea's shared venv (recreatable on
+  the next `start`).
 - `worktree-merge` is *coordinated, not transactional*: preflight all repos,
   rebase all branches, then fast-forward all mains. On a phase-1 failure no
   main is merged, but some idea branches may already have been rebased.
+
+## Shared Python venv
+
+Each idea gets **one** venv at `$__wt_venv_home/<idea>` (default
+`$__wt_worktree_home/.venvs/<idea>`) that is the **superset of the Python
+requirements from every repo in the idea's repo set** — not one venv per
+worktree. `worktree-start` provisions it before cd'ing in.
+
+Union resolution, per repo (from its **main clone**):
+
+- `pyproject.toml` present → installed **editable** (`-e <main clone>`), and it
+  *wins* over a sibling `requirements.txt`.
+- otherwise `requirements.txt` present → installed via `-r <main clone>/requirements.txt`.
+- neither → the repo contributes nothing.
+
+Installer: **uv** when on PATH (creates the venv and re-syncs deps on every
+`start` — fast, self-heals set changes); else `python3 -m venv` + pip (installs
+only on create, or with `worktree-venv --force`). If any repo has a Python
+manifest but **neither `uv` nor `python3`** is available, `worktree-start`
+**fast-fails before creating anything**.
+
+Shell integration: a `PWD`-change handler auto-activates the venv whenever you
+cd into any of the idea's worktrees (or a subdirectory of one) and deactivates
+when you leave or switch to another idea's worktree. `worktree-start` and
+`worktree-go` get this for free; `worktree-venv` can also ensure/refresh the
+venv on demand.
 
 ## Registry (`WORKTREES.md`)
 
@@ -131,7 +166,14 @@ alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
 
 ## Known limitations
 
-- **Install is npm-only** — gated on `package.json`; pnpm/yarn/bun repos are
+- **Python editable installs point at `main`** — a pyproject repo's package is
+  installed `-e` from its **main clone**, so `import`/console scripts run the
+  main checkout's code, not your idea branch's. The venv is per-idea and
+  survives `stop`/`rm`, so this keeps it stable; run `worktree-venv --force` if
+  you need it rebuilt.
+- **pip fallback doesn't self-heal** — without `uv`, set changes need
+  `worktree-venv --force` (uv re-syncs automatically).
+- **JS install is npm-only** — gated on `package.json`; pnpm/yarn/bun repos are
   not auto-installed yet (TODO).
 - **`main` is local** — keeping it current with `origin` is your job.
 - **Cross-repo operations are best-effort sequential** — `stop`/`rm` abort on a
@@ -141,7 +183,7 @@ alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
 
 ## Future work
 
-Idea-centric `worktree-list` dashboard; package-manager detection; non-mutating
+Idea-centric `worktree-list` dashboard; pnpm/yarn/bun detection; non-mutating
 stale-`main` warning; interactive skip/stash for mid-set stop/rm. Deliberately
 excluded: auto-commit/push/PR, state databases, daemons — Git stays the state
 machine.

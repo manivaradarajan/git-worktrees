@@ -8,6 +8,13 @@
 # Layout:
 #   $__wt_github_home/<repo>              main clones   (default: ~/github)
 #   $__wt_worktree_home/<repo>/<idea>     worktrees     (default: ~/git-worktrees)
+#   $__wt_venv_home/<idea>                shared venv   (default: ~/git-worktrees/.venvs)
+#
+# Each idea gets ONE shared Python venv that is the union of every participating
+# repo's Python manifests (pyproject.toml -> editable install; else
+# requirements.txt). It is created on worktree-start, kept by worktree-stop,
+# removed by worktree-rm, and auto-activated on cd into any of the idea's
+# worktrees.
 #
 # Repo groups (default fan-out sets) live in
 #   $__wt_worktree_home/WORKTREE-GROUPS   format: `name: repo1 repo2`
@@ -78,6 +85,9 @@ if not set -q __wt_github_home
 end
 if not set -q __wt_worktree_home
     set -g __wt_worktree_home ~/git-worktrees
+end
+if not set -q __wt_venv_home
+    set -g __wt_venv_home $__wt_worktree_home/.venvs
 end
 # __wt_repo_name — basename of the current repo (works in main clone and in
 # any linked worktree, since the common dir resolves to the main repo's .git
@@ -175,6 +185,140 @@ function __wt_validate_idea
     string match -q -- '-*' $idea; and return 1    # no leading dash
     git check-ref-format "refs/heads/$idea" >/dev/null 2>&1
 end
+
+# --- shared per-idea python venv --------------------------------------------
+# Each idea gets ONE venv at $__wt_venv_home/<idea> (default
+# $__wt_worktree_home/.venvs/<idea>) that is the UNION of every participating
+# repo's Python manifest. It is created on worktree-start, kept by
+# worktree-stop, removed by worktree-rm, and auto-activated on cd (see
+# __wt_maybe_activate_venv). uv is preferred; python3 + pip is the fallback.
+
+# __wt_venv_path — absolute path of the shared venv for an idea.
+function __wt_venv_path
+    echo $__wt_venv_home/$argv[1]
+end
+
+# __wt_python_manifest — the kind of Python manifest a repo's main clone has, or
+# nothing. `pyproject.toml` wins over `requirements.txt` (grantha-data has both).
+# Prints `pyproject` | `requirements` | (nothing).
+function __wt_python_manifest
+    set -l main_root $__wt_github_home/$argv[1]
+    if test -f $main_root/pyproject.toml
+        echo pyproject
+    else if test -f $main_root/requirements.txt
+        echo requirements
+    end
+end
+
+# __wt_venv_args — install arguments for the union venv from a repo set.
+# pyproject repos contribute `-e <main clone>` (editable; console scripts like
+# grantha-converter resolve). requirements-only repos contribute `-r <path>`.
+# Prints one argument per line (or nothing if no Python manifests).
+function __wt_venv_args
+    set -l args
+    for repo in $argv
+        switch (__wt_python_manifest $repo)
+            case pyproject
+                set -a args -e $__wt_github_home/$repo
+            case requirements
+                set -a args -r $__wt_github_home/$repo/requirements.txt
+        end
+    end
+    printf '%s\n' $args
+end
+
+# __wt_ensure_venv — create/refresh the shared per-idea venv as the union of
+# every Python manifest in the repo set. uv-first, python3+pip fallback.
+# With uv, re-syncs on every call (fast, self-heals set changes). With pip,
+# installs only on create or --force (pip reinstall of grantha-data is slow).
+# Progress goes to stderr so stdout stays clean for callers.
+#
+# Usage:   __wt_ensure_venv [--force] <idea> <repos...>
+# Exit codes: 0 ok (venv ensured, or no Python manifests / empty repo set);
+#             1 any install step failed.
+function __wt_ensure_venv
+    argparse 'f/force' -- $argv; or return 1
+    set -l idea $argv[1]
+    set -l repos $argv[2..-1]
+    set -l venv (__wt_venv_path $idea)
+    test (count $repos) -gt 0; or return 0
+    set -l args (__wt_venv_args $repos)
+    test -n "$args"; or return 0   # no Python manifests -> no venv to make
+    if command -sq uv
+        if not test -d $venv
+            echo "creating venv $venv (uv)" >&2
+            uv venv $venv; or return 1
+        end
+        echo "installing Python deps for '$idea' (uv)" >&2
+        uv pip install --python $venv/bin/python $args; or return 1
+    else
+        set -l created 0
+        if not test -d $venv
+            echo "creating venv $venv (python3)" >&2
+            python3 -m venv $venv; or return 1
+            set created 1
+        end
+        if test $created -eq 1; or set -q _flag_force
+            echo "installing Python deps for '$idea' (pip)" >&2
+            $venv/bin/pip install $args; or return 1
+        end
+    end
+end
+
+# __wt_idea_for_pwd — the idea whose worktree the current physical PWD is in,
+# or nothing. Works from inside any subdirectory of a worktree. Physical paths
+# (path resolve + pwd -P) dodge the macOS /var -> /private/var mismatch that
+# this file already handles elsewhere. Never treats the venv home itself as a
+# worktree.
+function __wt_idea_for_pwd
+    set -l wt_home (path resolve $__wt_worktree_home 2>/dev/null)
+    test -n "$wt_home"; or return 0
+    set -l here (pwd -P)
+    if string match -q -- "$wt_home/*/*" $here
+        set -l rel (string replace -- "$wt_home/" '' $here)
+        set -l parts (string split / $rel)
+        if test (count $parts) -ge 2; and not test "$parts[1]" = (basename $__wt_venv_home)
+            echo $parts[2]
+        end
+    end
+end
+
+# __wt_activate_idea — source the shared venv's activate.fish and record the
+# active idea. No-op if the venv is missing; skips re-activation when this idea
+# is already active (re-sourcing would duplicate the venv's PATH entry).
+function __wt_activate_idea
+    set -l idea $argv[1]
+    set -q __wt_active_idea; and test "$__wt_active_idea" = "$idea"; and return 0
+    set -l venv (__wt_venv_path $idea)
+    if test -d $venv
+        source $venv/bin/activate.fish
+        set -g __wt_active_idea $idea
+    end
+end
+
+# __wt_maybe_activate_venv — auto-activate the shared idea venv when cd'ing into
+# (or within) any of the idea's worktrees; deactivate when leaving or switching
+# ideas. Registered on every PWD change. `deactivate` (defined by activate.fish)
+# erases itself when called, so every call is guarded by $__wt_active_idea (also
+# checked via `functions -q deactivate`, in case a manual deactivate or a
+# worktree-rm of the live venv already cleared it) and cleared right after.
+function __wt_maybe_activate_venv --on-variable PWD
+    set -q __wt_venv_home; or return 0
+    set -l idea (__wt_idea_for_pwd)
+    if test -n "$idea"
+        if set -q __wt_active_idea
+            if test "$__wt_active_idea" = "$idea"
+                return 0
+            end
+            functions -q deactivate; and deactivate
+            set -e __wt_active_idea
+        end
+        __wt_activate_idea $idea
+    else if set -q __wt_active_idea
+        functions -q deactivate; and deactivate
+        set -e __wt_active_idea
+    end
+end
 # worktree-start — create or resume a worktree for an idea, then cd into it.
 #
 # Idempotent: if the worktree dir already exists (and is a valid worktree for
@@ -186,8 +330,12 @@ end
 #
 # Two-phase (mirrors worktree-merge): phase 0 validates the whole repo set
 # (main clone exists, is a git repo, has local `main`, destination is either
-# absent or a valid worktree for this idea/repo) BEFORE creating anything, so
-# a missing repo cannot leave a partially-created idea. Phase 1 creates/attaches.
+# absent or a valid worktree for this idea/repo, an interpreter present — uv or
+# python3 — if any repo has a Python manifest) BEFORE creating anything, so a
+# missing repo cannot leave a partially-created idea. Phase 1 creates/attaches
+# worktrees and provisions the shared per-idea venv ($__wt_venv_home/<idea>) as
+# the union of every participating repo's Python manifests. cd'ing into a
+# worktree then auto-activates that venv (see __wt_maybe_activate_venv).
 #
 # <idea> must satisfy <idea> == branch == one directory component (validated by
 # __wt_validate_idea). `main` here means the LOCAL main branch — keeping it
@@ -202,9 +350,10 @@ end
 #                          --save ramayana incorporate-ramayana-govindaraja
 #
 # Side effects: may run `npm install` (only when node_modules absent and a
-# package.json exists); may append to WORKTREE-GROUPS (with --save).
-# Exit codes: 0 ok; 1 usage error, invalid idea, or any phase-0 validation
-# failure (nothing created in that case).
+# package.json exists); may create/populate the shared idea venv; may append to
+# WORKTREE-GROUPS (with --save).
+# Exit codes: 0 ok; 1 usage error, invalid idea, any phase-0 validation
+# failure (nothing created in that case), or a venv-provisioning failure.
 function worktree-start
     argparse 'repos=' 'g/group=' 'save=' -- $argv; or return 1
     if not set -q argv[1]
@@ -273,6 +422,16 @@ function worktree-start
             end
         end
     end
+    # phase 0b — python fast-fail: a Python manifest without any interpreter
+    # aborts before anything is created. uv manages its own Pythons, so it is
+    # only python3 we need when uv is absent.
+    for repo in $repos
+        set -l manifest (__wt_python_manifest $repo)
+        if test -n "$manifest"; and not command -sq uv; and not command -sq python3
+            echo "worktree-start: $repo has a Python manifest but neither uv nor python3 is on PATH" >&2
+            return 1
+        end
+    end
     # phase 1 — create/attach (all validated above)
     for repo in $repos
         set -l path $__wt_worktree_home/$repo/$idea
@@ -282,6 +441,11 @@ function worktree-start
         else
             git -C $__wt_github_home/$repo worktree add -b $idea $path main
         end
+    end
+    # shared venv — union of Python manifests across the whole repo set
+    __wt_ensure_venv $idea $repos; or return 1
+    if test -d (__wt_venv_path $idea)
+        echo "venv: "(__wt_venv_path $idea)
     end
     if test (count $repos) -gt 1
         echo "paired worktrees:"
@@ -482,7 +646,8 @@ end
 # Removes the worktree first (git refuses branch deletion while a worktree is
 # live), then deletes the branch safe-first: `git branch -d`; if the branch is
 # not merged into main, prompts for a second confirmation before `git branch -D`.
-# Refuses when dirty unless --force.
+# Finally removes the shared idea venv (recreatable on next start; prompts
+# before removing). Refuses when dirty unless --force.
 #
 # Usage:   worktree-rm [--repos=A,B,C | -g NAME] [--force] <idea>
 # Flags:   --force  discard uncommitted changes and remove anyway
@@ -541,6 +706,17 @@ function worktree-rm
             end
         end
     end
+    # teardown the shared idea venv (recreatable on next start)
+    set -l venv (__wt_venv_path $idea)
+    if test -d $venv
+        read -l confirm -P "remove shared venv $venv? [Y/n] "
+        if string match -q -i 'n*' $confirm
+            echo "kept venv $venv"
+        else
+            rm -rf $venv
+            echo "removed venv $venv"
+        end
+    end
     echo "update WORKTREES.md — remove $idea rows"
 end
 # worktree-list — global recall: enumerate every worktree + registry across all
@@ -552,6 +728,9 @@ function worktree-list
     for repo in $__wt_worktree_home/*
         test -d $repo; or continue
         set -l name (basename $repo)
+        if test "$name" = (basename $__wt_venv_home)
+            continue   # shared venv dir is not a repo
+        end
         echo "== $name =="
         git -C $__wt_github_home/$name worktree list 2>/dev/null
         echo
@@ -561,6 +740,53 @@ function worktree-list
             echo "(no WORKTREES.md on main)"
         end
         echo
+    end
+end
+# worktree-venv — ensure/refresh the shared per-idea venv for a repo set.
+#
+# The venv is the UNION of every Python manifest in the set (pyproject -> -e,
+# else requirements.txt). uv-first, python3+pip fallback; uv re-syncs each call,
+# pip installs on create or --force. Prints the venv path. If the current PWD
+# is inside one of the idea's worktrees, activates the venv for this shell.
+#
+# Usage:   worktree-venv [--repos=A,B,C | -g NAME] [--force] <idea>
+# Flags:   --repos=A,B,C  explicit repo set for this invocation (ephemeral)
+#          -g NAME        named group from WORKTREE-GROUPS
+#          --force        with pip fallback, reinstall even if venv exists
+# Exit codes: 0 ok; 1 usage error, invalid idea, unknown group, or no Python
+# manifests in the set.
+function worktree-venv
+    argparse 'repos=' 'g/group=' 'f/force' -- $argv; or return 1
+    if not set -q argv[1]
+        echo "usage: worktree-venv [--repos=A,B,C | -g NAME] [--force] <idea>" >&2
+        return 1
+    end
+    if set -q _flag_repos; and set -q _flag_group
+        echo "worktree-venv: --repos and -g are mutually exclusive" >&2
+        return 1
+    end
+    set -l idea $argv[1]
+    __wt_validate_idea $idea
+    or begin
+        echo "worktree-venv: invalid idea name '$idea'" >&2
+        return 1
+    end
+    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group"); or return 1
+    if set -q _flag_force
+        __wt_ensure_venv --force $idea $repos; or return 1
+    else
+        __wt_ensure_venv $idea $repos; or return 1
+    end
+    set -l venv (__wt_venv_path $idea)
+    test -d $venv
+    or begin
+        echo "worktree-venv: no Python manifests in the set — nothing to install" >&2
+        return 1
+    end
+    echo $venv
+    set -l here_idea (__wt_idea_for_pwd)
+    if test -n "$here_idea"; and test "$here_idea" = "$idea"
+        __wt_activate_idea $idea
     end
 end
 # --- completions ------------------------------------------------------------
@@ -589,4 +815,8 @@ complete -c worktree-rm -f -a '(__fish_print_worktrees)'
 complete -c worktree-rm -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-rm -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-rm -s f -l force -d 'discard uncommitted changes'
+complete -c worktree-venv -f -a '(__fish_print_worktrees)'
+complete -c worktree-venv -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
+complete -c worktree-venv -l repos -r -d 'explicit repo set A,B,C'
+complete -c worktree-venv -s f -l force -d 'reinstall deps / rebuild venv'
 complete -c worktree-list -f
