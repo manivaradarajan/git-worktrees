@@ -25,13 +25,14 @@
 #   --save NAME     with --repos, persist the set as group NAME
 #
 # Lifecycle:
-#   author plan -> register (WORKTREES.md) -> worktree-start ->
+#   author plan -> register (global WORKTREES.md) -> worktree-start ->
 #   develop/commit -> worktree-merge (rebase+ff, no push) ->
 #   worktree-stop (park) | worktree-rm (teardown) -> update WORKTREES.md
 #
 # `main` always means the LOCAL main branch; this tool never fetches or pushes.
-# WORKTREES.md is human-maintained metadata (never auto-edited); its Status
-# column uses `active | parked | merged | abandoned`.
+# WORKTREES.md (at $__wt_worktree_home/WORKTREES.md, alongside WORKTREE-GROUPS)
+# is human-maintained metadata (never auto-edited); its Status column uses
+# `active | parked | merged | abandoned`.
 #
 # See README.md in this repo for the full guide.
 
@@ -184,6 +185,92 @@ function __wt_validate_idea
     string match -q -- '*/*' $idea; and return 1   # single path component
     string match -q -- '-*' $idea; and return 1    # no leading dash
     git check-ref-format "refs/heads/$idea" >/dev/null 2>&1
+end
+
+# --- shared per-idea node deps ----------------------------------------------
+# JS node_modules is per-worktree (gitignored, like .next/), so each worktree
+# needs its own install. On worktree-start we install deps in EVERY repo of
+# the set that has a package.json (not just the one we cd into), choosing the
+# manager from the worktree's lockfile. Best-effort: a failing install warns
+# but never aborts worktree-start — the worktree stays usable, and the user
+# can install manually.
+
+# __wt_js_manager — the JS package manager a worktree's lockfile implies, or
+# npm when there is no lockfile. Prints pnpm | yarn | bun | npm.
+#
+# Usage:   __wt_js_manager <worktree-root>
+# Exit codes: 0 always (a manager is always printed).
+function __wt_js_manager
+    set -l root $argv[1]
+    if test -f $root/pnpm-lock.yaml
+        echo pnpm
+    else if test -f $root/yarn.lock
+        echo yarn
+    else if test -f $root/bun.lockb; or test -f $root/bun.lock
+        echo bun
+    else
+        echo npm
+    end
+end
+
+# __wt_npm_install — install with npm, deterministic (npm ci) when a
+# package-lock.json is present, else plain `npm install`. Must run from inside
+# the target worktree.
+#
+# Usage:   __wt_npm_install
+# Exit codes: the npm command's status.
+function __wt_npm_install
+    if test -f package-lock.json
+        npm ci
+    else
+        npm install
+    end
+end
+
+# __wt_ensure_node — install JS deps for one repo's worktree of an idea.
+#
+# No-op (returns 0) when the worktree has no package.json or already has
+# node_modules. Otherwise cds into the worktree and installs with the
+# lockfile's manager if it is on PATH, falling back to npm when that manager
+# is missing; when npm is also missing the repo is skipped (returns 1).
+# Progress and warnings go to stderr.
+#
+# Usage:   __wt_ensure_node <idea> <repo>
+# Exit codes: 0 deps ensured (or nothing to do); 1 no manager on PATH;
+#             otherwise the install command's status.
+function __wt_ensure_node
+    set -l idea $argv[1]
+    set -l repo $argv[2]
+    set -l root $__wt_worktree_home/$repo/$idea
+    test -f $root/package.json; or return 0
+    test -d $root/node_modules; and return 0
+    set -l manager (__wt_js_manager $root)
+    set -l old_pwd $PWD
+    cd $root; or return 1
+    set -l install_status 1
+    if command -sq $manager
+        echo "installing JS deps in $root ($manager)" >&2
+        switch $manager
+            case npm
+                __wt_npm_install
+            case pnpm
+                pnpm install --frozen-lockfile
+            case yarn
+                yarn install --immutable
+            case bun
+                bun install --frozen-lockfile
+        end
+        set -l install_status $status
+    else if command -sq npm
+        echo "warning: $manager not on PATH, falling back to npm for $root" >&2
+        __wt_npm_install
+        set -l install_status $status
+    else
+        echo "warning: no JS package manager on PATH (need '$manager' or npm) —" \
+            "skipping $root" >&2
+    end
+    cd $old_pwd
+    return $install_status
 end
 
 # --- shared per-idea python venv --------------------------------------------
@@ -349,9 +436,10 @@ end
 # Example: worktree-start --repos=grantha-explorer,grantha-data,ramayana \
 #                          --save ramayana incorporate-ramayana-govindaraja
 #
-# Side effects: may run `npm install` (only when node_modules absent and a
-# package.json exists); may create/populate the shared idea venv; may append to
-# WORKTREE-GROUPS (with --save).
+# Side effects: may install JS deps in every repo of the set that has a
+# package.json (best-effort; manager chosen by lockfile, skipped when
+# node_modules already present); may create/populate the shared idea venv; may
+# append to WORKTREE-GROUPS (with --save).
 # Exit codes: 0 ok; 1 usage error, invalid idea, any phase-0 validation
 # failure (nothing created in that case), or a venv-provisioning failure.
 function worktree-start
@@ -447,6 +535,12 @@ function worktree-start
     if test -d (__wt_venv_path $idea)
         echo "venv: "(__wt_venv_path $idea)
     end
+    # JS deps — best-effort install in every repo of the set with a package.json
+    for repo in $repos
+        if not __wt_ensure_node $idea $repo
+            echo "warning: could not install JS deps in $__wt_worktree_home/$repo/$idea (install manually)" >&2
+        end
+    end
     if test (count $repos) -gt 1
         echo "paired worktrees:"
         for repo in $repos
@@ -461,12 +555,6 @@ function worktree-start
         set target $repos[1]
     end
     cd $__wt_worktree_home/$target/$idea
-    # NOTE (known deficiency, see §12): install is hardcoded to npm and gated
-    # only on package.json. Repos using pnpm/yarn/bun (lockfile:
-    # pnpm-lock.yaml / yarn.lock / bun.lockb) are currently NOT auto-installed.
-    if not test -d node_modules; and test -f package.json
-        npm install
-    end
     git status -sb
     git plan
 end
@@ -639,7 +727,7 @@ function worktree-stop
         end
         echo "parked $path (branch kept)"
     end
-    echo "update WORKTREES.md rows if parked"
+    echo "update $__wt_worktree_home/WORKTREES.md rows if parked"
 end
 # worktree-rm — tear down a worktree and delete its branch.
 #
@@ -717,14 +805,24 @@ function worktree-rm
             echo "removed venv $venv"
         end
     end
-    echo "update WORKTREES.md — remove $idea rows"
+    echo "update $__wt_worktree_home/WORKTREES.md — remove $idea rows"
 end
-# worktree-list — global recall: enumerate every worktree + registry across all
-# repos under $__wt_worktree_home. No repo needed; no flags.
+# worktree-list — global recall: print the idea registry ($__wt_worktree_home/
+# WORKTREES.md) plus every worktree across all repos under $__wt_worktree_home.
+# No repo needed; no flags.
 #
 # Usage:   worktree-list
 # Exit codes: 0 always (best-effort).
 function worktree-list
+    set -l registry $__wt_worktree_home/WORKTREES.md
+    if test -f $registry
+        echo "== registry =="
+        cat $registry
+        echo
+    else
+        echo "(no WORKTREES.md at $registry — create one to track ideas)"
+        echo
+    end
     for repo in $__wt_worktree_home/*
         test -d $repo; or continue
         set -l name (basename $repo)
@@ -733,12 +831,6 @@ function worktree-list
         end
         echo "== $name =="
         git -C $__wt_github_home/$name worktree list 2>/dev/null
-        echo
-        if git -C $__wt_github_home/$name cat-file -e main:WORKTREES.md 2>/dev/null
-            git -C $__wt_github_home/$name show main:WORKTREES.md 2>/dev/null | sed -n '1,30p'
-        else
-            echo "(no WORKTREES.md on main)"
-        end
         echo
     end
 end

@@ -92,14 +92,14 @@ Repo selection is mutually exclusive and defaults to the current repo only:
 
 | Command | Action |
 |---|---|
-| `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] <idea>` | Create/resume the worktree(s), cd in, run `npm install` (if `package.json` present), provision the shared Python venv (see below), print paired dirs. Two-phase: validates the whole repo set before creating anything. |
+| `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] <idea>` | Create/resume the worktree(s), cd in, install JS deps in **every repo of the set** with a `package.json` (npm ci with a lockfile, else npm install; pnpm/yarn/bun chosen per lockfile, npm fallback if the manager is missing), provision the shared Python venv (see below), print paired dirs. Two-phase: validates the whole repo set before creating anything. |
 | `worktree-go <idea>` | cd into this repo's worktree, show status + registry row. The shared venv auto-activates. |
 | `worktree-venv [--repos=A,B,C \| -g NAME] [--force] <idea>` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. |
 | `worktree-merge [--repos=A,B,C \| -g NAME] <idea>` | Coordinated rebase-onto-local-`main` then `--ff-only` merge into each main. No push. Not a cross-repo transaction. |
 | `worktree-stop [--repos=A,B,C \| -g NAME] [--force] <idea>` | Park: remove the worktree dir, keep the branch. Refuses if dirty unless `--force`. |
 | `worktree-rm [--repos=A,B,C \| -g NAME] [--force] <idea>` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`), then remove the shared venv. |
-| `worktree-list` | Global recall: every worktree + registry across all repos. |
-| `git plan` | Show this worktree's registry row from `main:WORKTREES.md`. |
+| `worktree-list` | Global recall: the idea registry plus every worktree across all repos. |
+| `git plan` | Show this idea's registry row from the global `$__wt_worktree_home/WORKTREES.md`. |
 
 `<idea>` must satisfy `<idea> == branch == one directory component` (validated;
 no `/`, no leading `-`, must be a valid Git ref). `main` always means the
@@ -108,7 +108,7 @@ no `/`, no leading `-`, must be a valid Git ref). `main` always means the
 ## Lifecycle
 
 ```text
-author plan -> register (WORKTREES.md) -> worktree-start ->
+author plan -> register (global WORKTREES.md) -> worktree-start ->
 develop/commit -> worktree-merge -> worktree-stop (park) | worktree-rm (teardown)
 -> update WORKTREES.md
 ```
@@ -150,9 +150,18 @@ venv on demand.
 
 ## Registry (`WORKTREES.md`)
 
-Each repo keeps a root `WORKTREES.md` — a **human-maintained** registry (never
-auto-edited). The tooling prints reminders at lifecycle boundaries. The Status
-column uses `active | parked | merged | abandoned`.
+A single **global** registry at `$__wt_worktree_home/WORKTREES.md` (default
+`~/git-worktrees/WORKTREES.md`, alongside `WORKTREE-GROUPS`) — not per-repo.
+One row per **idea** (an idea can span several repos), so `git plan` works from
+any of its worktrees:
+
+| Idea | Branch | Repos | Plan file | Status |
+|---|---|---|---|---|
+| `bring-in-ramayana-govindaraja` | `bring-in-ramayana-govindaraja` | grantha-data grantha-explorer ramayana | plans/PLAN_bring-in-ramayana-govindaraja.md | active |
+
+It is **human-maintained** (never auto-edited). The tooling prints reminders
+at lifecycle boundaries. The Status column uses
+`active | parked | merged | abandoned`.
 
 ## WORKTREE-GROUPS
 
@@ -173,8 +182,6 @@ alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
   you need it rebuilt.
 - **pip fallback doesn't self-heal** — without `uv`, set changes need
   `worktree-venv --force` (uv re-syncs automatically).
-- **JS install is npm-only** — gated on `package.json`; pnpm/yarn/bun repos are
-  not auto-installed yet (TODO).
 - **`main` is local** — keeping it current with `origin` is your job.
 - **Cross-repo operations are best-effort sequential** — `stop`/`rm` abort on a
   dirty repo in the middle; each per-repo step is individually safe.
@@ -183,7 +190,7 @@ alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
 
 ## Future work
 
-Idea-centric `worktree-list` dashboard; pnpm/yarn/bun detection; non-mutating
+Idea-centric `worktree-list` dashboard; non-mutating
 stale-`main` warning; interactive skip/stash for mid-set stop/rm. Deliberately
 excluded: auto-commit/push/PR, state databases, daemons — Git stays the state
 machine.

@@ -18,6 +18,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d /tmp/wt-test.XXXXXX)" || { echo "mktemp failed" >&2; exit 1; }
+# exported so the fish subshells (run_fish) can reference temp paths
+export WORK
 GITHUB_HOME="$WORK/github"
 WT_HOME="$WORK/wt"
 
@@ -88,20 +90,54 @@ for r in repo-req repo-req2 repo-py; do
     git -C "$GITHUB_HOME/$r" commit -qm python-manifests
 done
 
+# js repos for node-deps coverage — no Python manifests, so venv provisioning
+# no-ops. repo-js: package.json + lockfile (npm ci); repo-js-bare: package.json
+# only (npm install); repo-pnpm: package.json + pnpm lockfile (pnpm install).
+for r in repo-js repo-js-bare repo-pnpm; do
+    git init -q -b main "$GITHUB_HOME/$r"
+    git -C "$GITHUB_HOME/$r" config user.email t@t
+    git -C "$GITHUB_HOME/$r" config user.name t
+    echo base > "$GITHUB_HOME/$r/base.txt"
+    git -C "$GITHUB_HOME/$r" add -A
+    git -C "$GITHUB_HOME/$r" commit -qm base
+done
+echo '{"name":"repo-js","version":"0.0.1"}' > "$GITHUB_HOME/repo-js/package.json"
+echo '{}' > "$GITHUB_HOME/repo-js/package-lock.json"
+echo '{"name":"repo-js-bare","version":"0.0.1"}' > "$GITHUB_HOME/repo-js-bare/package.json"
+echo '{"name":"repo-pnpm","version":"0.0.1"}' > "$GITHUB_HOME/repo-pnpm/package.json"
+touch "$GITHUB_HOME/repo-pnpm/pnpm-lock.yaml"
+for r in repo-js repo-js-bare repo-pnpm; do
+    git -C "$GITHUB_HOME/$r" add -A
+    git -C "$GITHUB_HOME/$r" commit -qm js-manifests
+done
+
 # a PATH dir with git but NO python3/uv, for the python3 fast-fail test
 export WT_TESTBIN="$WORK/testbin"; mkdir -p "$WT_TESTBIN"
 ln -sf /usr/bin/git "$WT_TESTBIN/git"
 
-# registry on repo-a main so `git plan` has a row to match
-cat > "$GITHUB_HOME/repo-a/WORKTREES.md" <<EOF
+# a PATH dir of fake JS package managers that record calls to npm-calls.log and
+# fake a node_modules dir after install (all offline, instant, no side effects)
+export WT_NODEBIN="$WORK/nodebin"; mkdir -p "$WT_NODEBIN"
+for m in npm pnpm yarn bun; do
+    cat > "$WT_NODEBIN/$m" <<EOF
+#!/bin/sh
+echo "\$(basename \$0) \$@" >> "$WT_NODEBIN/npm-calls.log"
+mkdir -p node_modules
+exit 0
+EOF
+    chmod +x "$WT_NODEBIN/$m"
+done
+
+# global idea registry at $WT_HOME/WORKTREES.md so `git plan` has a row to
+# match (previously a per-repo committed WORKTREES.md on repo-a main)
+mkdir -p "$WT_HOME"
+cat > "$WT_HOME/WORKTREES.md" <<EOF
 # Worktrees
 
-| Worktree dir | Branch | Idea | Status |
-|---|---|---|---|
-| \`$WT_HOME/repo-a/idea-one\` | \`idea-one\` | Test idea one | active |
+| Idea | Branch | Repos | Plan file | Status |
+|---|---|---|---|---|
+| \`idea-one\` | \`idea-one\` | repo-a | Test idea one | active |
 EOF
-git -C "$GITHUB_HOME/repo-a" add WORKTREES.md
-git -C "$GITHUB_HOME/repo-a" commit -qm registry
 
 # configure (answer defaults) + install — fail loudly, don't cascade
 if ! printf "%s\n%s\n" "$GITHUB_HOME" "$WT_HOME" | HOME="$WORK/home" bash "$ROOT/configure.sh" >/dev/null 2>&1; then
@@ -353,6 +389,66 @@ if PATH="$OLDGIT2:$PATH" HOME="$WORK/home" bash "$ROOT/configure.sh" </dev/null 
 else
     ok "configure.sh refuses old git"
 fi
+
+echo "== JS deps =="
+
+run_fish "js manager picked from lockfile" '
+    mkdir -p "$WORK/jstest"
+    touch "$WORK/jstest/pnpm-lock.yaml"
+    test (__wt_js_manager "$WORK/jstest") = pnpm; or exit 1
+    rm "$WORK/jstest/pnpm-lock.yaml"
+    touch "$WORK/jstest/yarn.lock"
+    test (__wt_js_manager "$WORK/jstest") = yarn; or exit 1
+    rm "$WORK/jstest/yarn.lock"
+    touch "$WORK/jstest/bun.lockb"
+    test (__wt_js_manager "$WORK/jstest") = bun; or exit 1
+    rm "$WORK/jstest/bun.lockb"
+    touch "$WORK/jstest/bun.lock"
+    test (__wt_js_manager "$WORK/jstest") = bun; or exit 1
+    rm "$WORK/jstest/bun.lock"
+    touch "$WORK/jstest/package-lock.json"
+    test (__wt_js_manager "$WORK/jstest") = npm; or exit 1
+'
+
+run_fish "node installs in every repo with package.json, manager per lockfile" '
+    set -gx PATH "$WT_NODEBIN:$PATH"
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-js,repo-js-bare,repo-pnpm,repo-a idea-js >/dev/null 2>&1; or exit 1
+    test -d "$__wt_worktree_home/repo-js/idea-js/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/repo-js-bare/idea-js/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/repo-pnpm/idea-js/node_modules"; or exit 1
+    not test -d "$__wt_worktree_home/repo-a/idea-js/node_modules"; or exit 1
+    string match -q "*npm ci*" (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
+    string match -qr '^npm install$' (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
+    string match -q "*pnpm install --frozen-lockfile*" (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
+'
+
+run_fish "lockfile manager missing falls back to npm" '
+    mkdir -p "$WORK/npmonly"
+    ln -sf "$WT_NODEBIN/npm" "$WORK/npmonly/npm"
+    rm -f "$WT_NODEBIN/npm-calls.log"
+    set -gx PATH "$WORK/npmonly:$WT_TESTBIN:/usr/bin:/bin:/usr/sbin"
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-pnpm,repo-a idea-jsfb >/dev/null 2>&1; or exit 1
+    test -d "$__wt_worktree_home/repo-pnpm/idea-jsfb/node_modules"; or exit 1
+    string match -qr '^npm install$' (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
+'
+
+run_fish "no JS manager on PATH skips install with warning" '
+    set -gx PATH "$WT_TESTBIN:/usr/bin:/bin:/usr/sbin"
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-js,repo-a idea-jsnm >/dev/null 2>&1; or exit 1
+    not test -d "$__wt_worktree_home/repo-js/idea-jsnm/node_modules"; or exit 1
+'
+
+run_fish "node install skipped when node_modules already present" '
+    set -gx PATH "$WT_NODEBIN:$PATH"
+    cd "$__wt_github_home/repo-a"
+    set -l before (wc -l < "$WT_NODEBIN/npm-calls.log" 2>/dev/null; or echo 0)
+    worktree-start --repos=repo-js,repo-js-bare,repo-pnpm,repo-a idea-js >/dev/null 2>&1; or exit 1
+    set -l after (wc -l < "$WT_NODEBIN/npm-calls.log" 2>/dev/null; or echo 0)
+    test "$before" = "$after"; or exit 1
+'
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

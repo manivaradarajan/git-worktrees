@@ -57,18 +57,31 @@ ln -sf "$REPO_DIR/worktrees.fish" "$CONF_DIR/worktrees.fish"
 echo "symlinked $CONF_DIR/worktrees.fish -> $REPO_DIR/worktrees.fish"
 
 # -- 2. set the git plan alias ------------------------------------------------------
-# Reads the current worktree's row from main:WORKTREES.md. The branch column is
-# backtick-delimited; the stored config value must contain `\`` (backslash +
-# backtick) so POSIX sh renders a LITERAL backtick inside double quotes. The
-# single-quoted string argument to printf preserves the backslashes verbatim.
+# Reads the current branch's row from the GLOBAL idea registry
+# ($__wt_worktree_home/WORKTREES.md, alongside WORKTREE-GROUPS) — not a
+# per-repo committed file. The branch column is backtick-delimited; the stored
+# config value must contain `\`` (backslash + backtick) so POSIX sh renders a
+# LITERAL backtick inside double quotes. The single-quoted argument to printf
+# preserves the backslashes verbatim; the path to WORKTREES.md (marked $WT_HOME
+# below) is interpolated at install time from the worktrees-config.fish written
+# by configure.sh, while `$(...)` runs at alias-invocation time.
 # Stored value (for reference):
-#   !git show main:WORKTREES.md 2>/dev/null | grep -F "| \`$(git branch --show-current)\` |" || { echo "No WORKTREES.md row for branch: $(git branch --show-current) — add one on main."; git worktree list; }
+#   !grep -F "| \`$(git branch --show-current)\` |" "$WT_HOME/WORKTREES.md" 2>/dev/null || { echo "No WORKTREES.md row for branch: $(git branch --show-current) — add one in $WT_HOME/WORKTREES.md."; git worktree list; }
 
-PLAN_ALIAS="$(printf '%s' '!git show main:WORKTREES.md 2>/dev/null | grep -F "| \`$(git branch --show-current)\` |" || { echo "No WORKTREES.md row for branch: $(git branch --show-current) — add one on main."; git worktree list; }')"
+CONF_FILE="$CONF_DIR/worktrees-config.fish"
+# Ask fish to evaluate the config so hand-edited quoting/formatting can't break
+# the parse (sed on the exact line would silently fall back).
+WT_HOME=""
+if [[ -f "$CONF_FILE" ]]; then
+    WT_HOME="$(fish -c "source '$CONF_FILE' >/dev/null 2>&1; and echo \"\$__wt_worktree_home\"" 2>/dev/null)"
+fi
+test -n "$WT_HOME" || WT_HOME="$HOME/git-worktrees"
+
+PLAN_ALIAS="$(printf '%s' "!grep -F \"| \\\`\$(git branch --show-current)\\\` |\" \"$WT_HOME/WORKTREES.md\" 2>/dev/null || { echo \"No WORKTREES.md row for branch: \$(git branch --show-current) — add one in $WT_HOME/WORKTREES.md.\"; git worktree list; }")"
 
 git config --global alias.plan "$PLAN_ALIAS"
 
-echo "set git alias: plan"
+echo "set git alias: plan (reads $WT_HOME/WORKTREES.md)"
 
 # -- 3. reload hint -----------------------------------------------------------------
 
