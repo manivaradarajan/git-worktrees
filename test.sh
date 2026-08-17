@@ -8,8 +8,9 @@
 # Coverage: start / idempotent restart / multi-repo / missing-repo preflight /
 # invalid idea / bogus destination / go / git plan / merge refusals / coordinated
 # merge / stop+resume / rm / shared python venv (union resolution, auto-activation,
-# pip fallback, python3 fast-fail) / environment fast-fail guards. All installs
-# are offline (manifests are dependency-free).
+# pip fallback, python3 fast-fail) / repo-local .venv auto-activation (incl. the
+# inherited-PATH clobber regression) / JS deps / environment fast-fail guards.
+# All installs are offline (manifests are dependency-free).
 #
 # Usage:   ./test.sh
 # no `-e` on purpose: run_fish + ok/fail manage status explicitly; `-e` would
@@ -40,6 +41,9 @@ run_fish() {
     local out
     out="$(HOME="$WORK/home" fish -c "
         set -gx XDG_CONFIG_HOME \"\$HOME/.config\"
+        for v in VIRTUAL_ENV VIRTUAL_ENV_PROMPT _OLD_VIRTUAL_PATH _OLD_VIRTUAL_PYTHONHOME _OLD_FISH_PROMPT_OVERRIDE
+            set -q \$v; and set -e \$v
+        end
         source \$XDG_CONFIG_HOME/fish/conf.d/worktrees-config.fish
         source \$XDG_CONFIG_HOME/fish/conf.d/worktrees.fish
         $script
@@ -89,6 +93,29 @@ for r in repo-req repo-req2 repo-py; do
     git -C "$GITHUB_HOME/$r" add -A
     git -C "$GITHUB_HOME/$r" commit -qm python-manifests
 done
+
+# a repo-local .venv in repo-a (main clone) for the repo-venv auto-activation
+# coverage — a minimal, offline activate.fish that mirrors the real template's
+# deactivate/snapshot behavior (no python3 or uv needed).
+mkdir -p "$GITHUB_HOME/repo-a/.venv/bin"
+cat > "$GITHUB_HOME/repo-a/.venv/bin/activate.fish" <<EOF
+function deactivate  -d "Exit virtual environment and return to normal shell environment"
+    if test -n "\$_OLD_VIRTUAL_PATH"
+        set -gx PATH \$_OLD_VIRTUAL_PATH
+        set -e _OLD_VIRTUAL_PATH
+    end
+    set -e VIRTUAL_ENV
+    set -e VIRTUAL_ENV_PROMPT
+    if test "\$argv[1]" != "nondestructive"
+        functions -e deactivate
+    end
+end
+deactivate nondestructive
+set -gx VIRTUAL_ENV "$GITHUB_HOME/repo-a/.venv"
+set -gx _OLD_VIRTUAL_PATH \$PATH
+set -gx PATH "\$VIRTUAL_ENV/bin" \$PATH
+set -gx VIRTUAL_ENV_PROMPT repo-a
+EOF
 
 # js repos for node-deps coverage — no Python manifests, so venv provisioning
 # no-ops. repo-js: package.json + lockfile (npm ci); repo-js-bare: package.json
@@ -311,6 +338,77 @@ run_fish "python3 missing fast-fails phase 0 (nothing created)" '
     worktree-start --repos=repo-req,repo-req2 idea-nopython >/dev/null 2>&1; and exit 1
     not test -d "$__wt_venv_home/idea-nopython"; or exit 1
     not test -d "$__wt_worktree_home/repo-req/idea-nopython"; or exit 1
+'
+
+echo "== repo-local .venv auto-activation =="
+
+run_fish "repo .venv activates on cd into main clone, holds in subdirs" '
+    cd "$__wt_github_home/repo-a"
+    string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
+    mkdir -p "$__wt_github_home/repo-a/sub"
+    cd "$__wt_github_home/repo-a/sub"
+    string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
+'
+
+run_fish "repo .venv deactivates on leaving to a repo with none" '
+    cd "$__wt_github_home/repo-a"
+    test -n "$VIRTUAL_ENV"; or exit 1
+    cd "$__wt_github_home/repo-b"
+    test -z "$VIRTUAL_ENV"; or exit 1
+'
+
+run_fish "clobber regression: stale inherited venv state preserves PATH" '
+    mkdir -p "$WORK/sentinel"
+    cd "$__wt_github_home/repo-b"
+    set -gx VIRTUAL_ENV "$WORK/ghost-venv"
+    set -gx _OLD_VIRTUAL_PATH "/usr/bin"
+    set -gx PATH "$WORK/sentinel" $PATH
+    cd "$__wt_github_home/repo-a"
+    string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
+    string match -q "*$WORK/sentinel*" "$PATH"; or exit 1
+    not string match -q "*ghost-venv/bin*" "$PATH"; or exit 1
+'
+
+run_fish "main clone .venv and shared idea venv swap cleanly (no PATH dup)" '
+    cd "$__wt_github_home/repo-req"
+    worktree-start --repos=repo-req idea-rvswap >/dev/null 2>&1; or exit 1
+    cd "$__wt_github_home/repo-req"
+    test -z "$VIRTUAL_ENV"; or exit 1
+    cd "$__wt_worktree_home/repo-req/idea-rvswap"
+    test -n "$VIRTUAL_ENV"; or exit 1
+    test (count (string match -- "$__wt_venv_home/idea-rvswap/bin" $PATH)) -le 1; or exit 1
+    cd "$__wt_github_home/repo-a"
+    string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
+    test (count (string match -- "*/repo-a/.venv/bin" $PATH)) -le 1; or exit 1
+'
+
+run_fish "worktree with no .venv (no python manifest) stays un-activated" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a idea-rvbare >/dev/null 2>&1; or exit 1
+    cd "$__wt_worktree_home/repo-a/idea-rvbare"
+    test -z "$VIRTUAL_ENV"; or exit 1
+'
+
+run_fish "venv-activate is idempotent and PATH-preserving" '
+    cd "$__wt_github_home/repo-b"
+    test -z "$VIRTUAL_ENV"; or exit 1
+    venv-activate "$__wt_github_home/repo-a/.venv"; or exit 1
+    test -n "$VIRTUAL_ENV"; or exit 1
+    set -l before (string join : $PATH)
+    venv-activate "$__wt_github_home/repo-a/.venv"; or exit 1
+    set -l after (string join : $PATH)
+    test "$before" = "$after"; or exit 1
+'
+
+run_fish "toggle off disables repo .venv auto-activation" '
+    cd "$__wt_github_home/repo-b"
+    set -g __wt_auto_repo_venv 0
+    cd "$__wt_github_home/repo-a"
+    test -z "$VIRTUAL_ENV"; or exit 1
+    cd "$__wt_github_home/repo-b"
+    set -g __wt_auto_repo_venv 1
+    cd "$__wt_github_home/repo-a"
+    string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
 '
 
 echo "== environment fast-fail =="

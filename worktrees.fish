@@ -73,6 +73,22 @@ if not __wt_version_ge "$__wt_git_ver" "2.31"
 end
 functions -e __wt_version_ge
 
+# --- inherited-venv-state scrub ---------------------------------------------
+# `activate.fish` begins with `deactivate nondestructive`, which restores
+# `_OLD_VIRTUAL_PATH`. When this shell was spawned from inside an active venv
+# (e.g. opencode launched from a project venv), those *_OLD_* vars are inherited
+# STALE — the first `source activate.fish` in this shell would then restore a
+# PATH that predates the global tools (bun, ~/.local/bin) before prepending
+# .venv/bin, silently dropping them. Scrub the inherited copies so any later
+# activation snapshots the CURRENT path. `set -q` guard: `set -e` on an unset
+# variable errors.
+function __wt_scrub_inherited_venv_state
+    for v in _OLD_VIRTUAL_PATH _OLD_VIRTUAL_PYTHONHOME _OLD_FISH_PROMPT_OVERRIDE
+        set -q $v; and set -e $v
+    end
+end
+__wt_scrub_inherited_venv_state
+
 # --- configuration ---------------------------------------------------------
 # Roots for main clones and worktrees. configure.sh writes these to
 # ~/.config/fish/conf.d/worktrees-config.fish, which loads AFTER config.fish —
@@ -89,6 +105,13 @@ if not set -q __wt_worktree_home
 end
 if not set -q __wt_venv_home
     set -g __wt_venv_home $__wt_worktree_home/.venvs
+end
+# __wt_auto_repo_venv — auto-activate a repo-local `.venv` on cd into any
+# directory that contains one (direnv-style). Worktree directories are exempt
+# (the worktree handler owns their shared idea venv). Set `0` in
+# worktrees-config.fish to disable.
+if not set -q __wt_auto_repo_venv
+    set -g __wt_auto_repo_venv 1
 end
 # __wt_repo_name — basename of the current repo (works in main clone and in
 # any linked worktree, since the common dir resolves to the main repo's .git
@@ -278,7 +301,7 @@ end
 # $__wt_worktree_home/.venvs/<idea>) that is the UNION of every participating
 # repo's Python manifest. It is created on worktree-start, kept by
 # worktree-stop, removed by worktree-rm, and auto-activated on cd (see
-# __wt_maybe_activate_venv). uv is preferred; python3 + pip is the fallback.
+# __wt_auto_activate_venv). uv is preferred; python3 + pip is the fallback.
 
 # __wt_venv_path — absolute path of the shared venv for an idea.
 function __wt_venv_path
@@ -370,41 +393,118 @@ function __wt_idea_for_pwd
     end
 end
 
-# __wt_activate_idea — source the shared venv's activate.fish and record the
-# active idea. No-op if the venv is missing; skips re-activation when this idea
-# is already active (re-sourcing would duplicate the venv's PATH entry).
-function __wt_activate_idea
-    set -l idea $argv[1]
-    set -q __wt_active_idea; and test "$__wt_active_idea" = "$idea"; and return 0
-    set -l venv (__wt_venv_path $idea)
-    if test -d $venv
-        source $venv/bin/activate.fish
-        set -g __wt_active_idea $idea
-    end
+# __wt_deactivate_venv — deactivate the manager-owned venv, if any. Only acts
+# when this session's manager actually activated something ($__wt_active_venv),
+# so a venv the user activated by hand (`source .../activate.fish`) is left
+# alone. `deactivate` (defined by activate.fish) erases itself when called, so
+# the call is guarded by `functions -q` in case a `worktree-rm` of a live venv
+# already cleared it.
+function __wt_deactivate_venv
+    set -q __wt_active_venv; or return 0
+    functions -q deactivate; and deactivate
+    set -e __wt_active_venv
 end
 
-# __wt_maybe_activate_venv — auto-activate the shared idea venv when cd'ing into
-# (or within) any of the idea's worktrees; deactivate when leaving or switching
-# ideas. Registered on every PWD change. `deactivate` (defined by activate.fish)
-# erases itself when called, so every call is guarded by $__wt_active_idea (also
-# checked via `functions -q deactivate`, in case a manual deactivate or a
-# worktree-rm of the live venv already cleared it) and cleared right after.
-function __wt_maybe_activate_venv --on-variable PWD
+# __wt_activate_venv — activate a Python venv through a single manager so the
+# PATH clobber can never happen. Idempotent per venv (physical path). Before
+# sourcing: deactivate whatever is active, scrub inherited *_OLD_* vars, and
+# strip an inherited venv's bin from PATH so activate.fish snapshots the TRUE
+# baseline (no duplicated .venv/bin entry, and `deactivate` later restores the
+# right path).
+#
+# Usage:   __wt_activate_venv <venv>
+# Exit codes: 0 activated (or already active); 1 venv missing.
+function __wt_activate_venv
+    set -l venv (path resolve $argv[1] 2>/dev/null)
+    test -n "$venv"; or return 1
+    if set -q __wt_active_venv; and test "$__wt_active_venv" = "$venv"
+        return 0
+    end
+    # target missing (e.g. no Python manifest) -> deactivate the current venv
+    # and stop, so a repo venv never leaks into a context that should have none
+    if not test -f "$venv/bin/activate.fish"
+        __wt_deactivate_venv
+        return 1
+    end
+    __wt_deactivate_venv
+    if set -q VIRTUAL_ENV
+        set -l base (path resolve $VIRTUAL_ENV/bin 2>/dev/null)
+        if test -n "$base"
+            set -l newpath
+            for p in $PATH
+                if not test "$p" = "$base"
+                    set -a newpath $p
+                end
+            end
+            set -gx PATH $newpath
+        end
+    end
+    __wt_scrub_inherited_venv_state
+    # Disable activate.fish's prompt override: this manager activates venvs
+    # programmatically on every cd, and the prompt override's
+    # `functions -c fish_prompt _old_fish_prompt` collides when a stale
+    # _old_fish_prompt survives (e.g. a shell spawned from inside a venv). The
+    # user's own fish_prompt is left untouched. Scoped to this function so a
+    # later manual `source .../activate.fish` still gets the prompt override.
+    set -lx VIRTUAL_ENV_DISABLE_PROMPT 1
+    source $venv/bin/activate.fish
+    set -g __wt_active_venv $venv
+end
+
+# __wt_find_repo_venv — the nearest repo-local `.venv` walking up from PWD,
+# capped at $HOME (or filesystem root when $HOME is unreachable), or nothing.
+# Physical paths dodge the macOS /var -> /private/var mismatch handled elsewhere
+# in this file.
+function __wt_find_repo_venv
+    set -l here (path resolve $PWD 2>/dev/null)
+    test -n "$here"; or return 1
+    set -l home (path resolve $HOME 2>/dev/null)
+    while true
+        if test -f "$here/.venv/bin/activate.fish"
+            echo "$here/.venv"
+            return 0
+        end
+        test "$here" = "$home"; and break
+        set -l parent (dirname "$here")
+        test "$parent" = "$here"; and break
+        set here $parent
+    end
+    return 1
+end
+
+# __wt_auto_activate_venv — single PWD-change handler that resolves the venv to
+# activate in precedence order: an idea's shared venv (inside a worktree) wins;
+# otherwise a repo-local `.venv` (when the toggle is on); otherwise deactivate.
+# One handler avoids any reliance on fish's event-handler registration order.
+function __wt_auto_activate_venv --on-variable PWD
     set -q __wt_venv_home; or return 0
     set -l idea (__wt_idea_for_pwd)
     if test -n "$idea"
-        if set -q __wt_active_idea
-            if test "$__wt_active_idea" = "$idea"
-                return 0
-            end
-            functions -q deactivate; and deactivate
-            set -e __wt_active_idea
+        __wt_activate_venv (__wt_venv_path $idea)
+    else if not test "$__wt_auto_repo_venv" = 0
+        set -l venv (__wt_find_repo_venv)
+        if test -n "$venv"
+            __wt_activate_venv $venv
+        else
+            __wt_deactivate_venv
         end
-        __wt_activate_idea $idea
-    else if set -q __wt_active_idea
-        functions -q deactivate; and deactivate
-        set -e __wt_active_idea
+    else
+        __wt_deactivate_venv
     end
+end
+
+# venv-activate — manually activate a Python venv through the same manager used
+# by auto-activation, so PATH is preserved (no _OLD_VIRTUAL_PATH clobber) and
+# switching venvs deactivates the previous one.
+#
+# Usage:   venv-activate <venv>
+# Exit codes: 0 activated (or already active); 1 usage error or venv not found.
+function venv-activate
+    if not set -q argv[1]
+        echo "usage: venv-activate <venv>" >&2
+        return 1
+    end
+    __wt_activate_venv $argv[1]
 end
 # worktree-start — create or resume a worktree for an idea, then cd into it.
 #
@@ -422,7 +522,7 @@ end
 # missing repo cannot leave a partially-created idea. Phase 1 creates/attaches
 # worktrees and provisions the shared per-idea venv ($__wt_venv_home/<idea>) as
 # the union of every participating repo's Python manifests. cd'ing into a
-# worktree then auto-activates that venv (see __wt_maybe_activate_venv).
+# worktree then auto-activates that venv (see __wt_auto_activate_venv).
 #
 # <idea> must satisfy <idea> == branch == one directory component (validated by
 # __wt_validate_idea). `main` here means the LOCAL main branch — keeping it
@@ -878,7 +978,7 @@ function worktree-venv
     echo $venv
     set -l here_idea (__wt_idea_for_pwd)
     if test -n "$here_idea"; and test "$here_idea" = "$idea"
-        __wt_activate_idea $idea
+        __wt_activate_venv $venv
     end
 end
 # --- completions ------------------------------------------------------------
@@ -912,3 +1012,4 @@ complete -c worktree-venv -s g -l group -r -a '(__fish_print_groups)' -d 'repo g
 complete -c worktree-venv -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-venv -s f -l force -d 'reinstall deps / rebuild venv'
 complete -c worktree-list -f
+complete -c venv-activate -r -d 'Python venv to activate'

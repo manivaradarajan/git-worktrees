@@ -42,7 +42,9 @@ $__wt_worktree_home/WORKTREE-GROUPS named repo groups
 Both homes are configurable. `configure.sh` writes an override that loads
 before the functions file; `worktrees.fish` itself ships with defaults only.
 `$__wt_venv_home` (default `$__wt_worktree_home/.venvs`) is where each idea's
-**shared Python venv** lives — see *Shared Python venv* below.
+**shared Python venv** lives — see *Shared Python venv* below. Any directory
+with its own `.venv` (typically a **main clone** like `~/github/grantha-data`)
+gets that venv auto-activated on cd — see *Repo-local .venv*.
 
 ## Requirements
 
@@ -88,8 +90,9 @@ dir (no real repos touched, cleans up after). It covers: start / idempotent
 restart / multi-repo / missing-repo preflight / invalid-idea / bogus-destination
 / go / `git plan` matching / merge dirty-main and wrong-branch refusal /
 coordinated merge / stop keeps branch / stop refuses dirty without `--force` /
-resume / rm / and the environment fast-fail guards. Exits nonzero if any test
-fails.
+resume / rm / shared python venv (union + auto-activation) / repo-local `.venv`
+auto-activation (incl. the PATH-clobber regression) / JS deps / and the
+environment fast-fail guards. Exits nonzero if any test fails.
 
 ```sh
 ./test.sh
@@ -115,6 +118,7 @@ Repo selection is mutually exclusive and defaults to the current repo only:
 | `worktree-rm [--repos=A,B,C \| -g NAME] [--force] <idea>` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`), then remove the shared venv. |
 | `worktree-list` | Global recall: the idea registry plus every worktree across all repos. |
 | `git plan` | Show this idea's registry row from the global `$__wt_worktree_home/WORKTREES.md`. |
+| `venv-activate <venv>` | Manually activate a Python venv through the same manager the auto-activation uses, so PATH is preserved (see *Repo-local .venv*). |
 
 `<idea>` must satisfy `<idea> == branch == one directory component` (validated;
 no `/`, no leading `-`, must be a valid Git ref). `main` always means the
@@ -163,6 +167,27 @@ when you leave or switch to another idea's worktree. `worktree-start` and
 `worktree-go` get this for free; `worktree-venv` can also ensure/refresh the
 venv on demand.
 
+## Repo-local `.venv`
+
+In addition to the shared per-idea venv, any directory that contains a `.venv`
+(typically a **main clone** such as `~/github/grantha-data`) is auto-activated
+on cd — walk up from the working directory for a `.venv/bin/activate.fish`,
+capped at `$HOME` — and deactivated on leaving. Worktree directories are exempt
+(the shared idea venv above owns them). This is enabled by default; disable it
+with `set -g __wt_auto_repo_venv 0` in `worktrees-config.fish`.
+
+Activation goes through a single manager that is immune to the classic
+**venv-in-venv PATH clobber**: a shell spawned from inside an active venv
+inherits `activate.fish`'s internal `_OLD_VIRTUAL_PATH`, and a naive
+`source .../activate.fish` would then restore a stale PATH missing global tools
+(e.g. `~/.bun/bin`). The manager scrubs inherited `_OLD_*` vars at startup,
+strips an inherited venv's `bin` from PATH before activating, and is idempotent
+per venv. It also disables `activate.fish`'s prompt override
+(`VIRTUAL_ENV_DISABLE_PROMPT`) so programmatic activation never rewrites your
+`fish_prompt` or collides with a stale `_old_fish_prompt`. To activate by hand,
+prefer `venv-activate .venv` over a raw `source .venv/bin/activate.fish` — it
+uses the same safe path.
+
 ## Registry (`WORKTREES.md`)
 
 A single **global** registry at `$__wt_worktree_home/WORKTREES.md` (default
@@ -195,6 +220,11 @@ alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
   main checkout's code, not your idea branch's. The venv is per-idea and
   survives `stop`/`rm`, so this keeps it stable; run `worktree-venv --force` if
   you need it rebuilt.
+- **Repo-local `.venv` activation is directory-driven, not repo-driven** — it
+  keys off the presence of `.venv`, so it fires in any directory (not only git
+  repos) and won't distinguish two checkouts that share an ancestor with a
+  `.venv`. A raw `source .venv/bin/activate.fish` still carries the PATH clobber
+  described above — use `venv-activate .venv` instead.
 - **pip fallback doesn't self-heal** — without `uv`, set changes need
   `worktree-venv --force` (uv re-syncs automatically).
 - **`main` is local** — keeping it current with `origin` is your job.
