@@ -188,6 +188,11 @@ per venv. It also disables `activate.fish`'s prompt override
 prefer `venv-activate .venv` over a raw `source .venv/bin/activate.fish` — it
 uses the same safe path.
 
+On every actual activation/deactivation the manager prints the venv path to
+stderr (`activated venv: <path>` / `deactivated venv: <path>`), so the current
+venv is always visible in the terminal history without a prompt indicator.
+(Internal cd round-trips, e.g. during `worktree-start`, are quiet.)
+
 ## Registry (`WORKTREES.md`)
 
 A single **global** registry at `$__wt_worktree_home/WORKTREES.md` (default

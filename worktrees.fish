@@ -269,6 +269,13 @@ function __wt_ensure_node
     test -d $root/node_modules; and return 0
     set -l manager (__wt_js_manager $root)
     set -l old_pwd $PWD
+    # Suppress venv-activation echoes for these internal cd round-trips (they
+    # are not user-initiated venv changes). `-lx` not `-l`: fish locals are
+    # invisible to other functions, and the --on-variable PWD handler is a
+    # separate function — the flag must be EXPORTED for __wt_activate_venv /
+    # __wt_deactivate_venv to see it. (It also lands in the env of the install
+    # commands below; harmless.)
+    set -lx __wt_quiet_venv 1
     cd $root; or return 1
     set -l install_status 1
     if command -sq $manager
@@ -283,11 +290,11 @@ function __wt_ensure_node
             case bun
                 bun install --frozen-lockfile
         end
-        set -l install_status $status
+        set install_status $status
     else if command -sq npm
         echo "warning: $manager not on PATH, falling back to npm for $root" >&2
         __wt_npm_install
-        set -l install_status $status
+        set install_status $status
     else
         echo "warning: no JS package manager on PATH (need '$manager' or npm) —" \
             "skipping $root" >&2
@@ -398,11 +405,20 @@ end
 # so a venv the user activated by hand (`source .../activate.fish`) is left
 # alone. `deactivate` (defined by activate.fish) erases itself when called, so
 # the call is guarded by `functions -q` in case a `worktree-rm` of a live venv
-# already cleared it.
+# already cleared it. Echoes the deactivated venv path to stderr so a venv
+# change is visible in the terminal without polluting callers' stdout.
 function __wt_deactivate_venv
     set -q __wt_active_venv; or return 0
+    set -l old_venv $__wt_active_venv
     functions -q deactivate; and deactivate
     set -e __wt_active_venv
+    # stderr: these live in __wt_activate_venv/__wt_deactivate_venv, which are
+    # also called from worktree-venv where stdout is DATA (the venv path).
+    # Silent during a switch: __wt_activate_venv reports the combined
+    # transition in one post-success message instead.
+    if not set -q __wt_quiet_venv; and not set -q __wt_switching_venv
+        echo "deactivated venv: $old_venv" >&2
+    end
 end
 
 # __wt_activate_venv — activate a Python venv through a single manager so the
@@ -410,7 +426,9 @@ end
 # sourcing: deactivate whatever is active, scrub inherited *_OLD_* vars, and
 # strip an inherited venv's bin from PATH so activate.fish snapshots the TRUE
 # baseline (no duplicated .venv/bin entry, and `deactivate` later restores the
-# right path).
+# right path). Echoes the resulting venv path to stderr (a switch is reported
+# as one `switched venv: A -> B` message, only after it succeeds) so a venv
+# change is visible in the terminal without polluting callers' stdout.
 #
 # Usage:   __wt_activate_venv <venv>
 # Exit codes: 0 activated (or already active); 1 venv missing.
@@ -426,6 +444,16 @@ function __wt_activate_venv
         __wt_deactivate_venv
         return 1
     end
+    # capture the pre-switch venv (if any) and keep the deactivate silent; the
+    # single post-success message below reports the whole transition.
+    # `set -l old_venv ""` is pre-declared in FUNCTION scope so the assignment
+    # inside the `if` below updates this var, not an if-block-local that would
+    # be discarded (misreporting a switch as a fresh activation).
+    set -l old_venv ""
+    if set -q __wt_active_venv
+        set old_venv $__wt_active_venv
+    end
+    set -l __wt_switching_venv 1
     __wt_deactivate_venv
     if set -q VIRTUAL_ENV
         set -l base (path resolve $VIRTUAL_ENV/bin 2>/dev/null)
@@ -447,8 +475,19 @@ function __wt_activate_venv
     # user's own fish_prompt is left untouched. Scoped to this function so a
     # later manual `source .../activate.fish` still gets the prompt override.
     set -lx VIRTUAL_ENV_DISABLE_PROMPT 1
-    source $venv/bin/activate.fish
+    if not source $venv/bin/activate.fish
+        echo "failed to activate $venv (previous venv deactivated)" >&2
+        return 1
+    end
     set -g __wt_active_venv $venv
+    # single post-success message (reports a switch as one transition)
+    if not set -q __wt_quiet_venv
+        if test -n "$old_venv"
+            echo "switched venv: $old_venv -> $venv" >&2
+        else
+            echo "activated venv: $venv" >&2
+        end
+    end
 end
 
 # __wt_find_repo_venv — the nearest repo-local `.venv` walking up from PWD,
