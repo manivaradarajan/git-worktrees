@@ -21,6 +21,15 @@ under its own branch, so none can trample another. It's a thin, defensive Fish
 layer over Git: Git remains the state machine; the registry is human-readable
 metadata; nothing is fetched, pushed, or committed automatically.
 
+## Contents
+
+This repo hosts two tools:
+
+| Tool | What it is | Where |
+|---|---|---|
+| worktrees (fish) | Idea-workspace tooling on `git worktree` | `worktrees.fish`, `install.sh`, `configure.sh` |
+| opencode model-routing | DeepSeek Pro/Flash routing alarm + contract | `opencode/` |
+
 ## Layout
 
 ```
@@ -58,13 +67,19 @@ cryptically at first use:
 git clone <this repo> ~/github/git-worktrees
 cd ~/github/git-worktrees
 
-./configure.sh   # interactive: homes + seed WORKTREE-GROUPS
-./install.sh     # symlink worktrees.fish + set the `git plan` alias
+./install.sh   # one-shot: configure (if needed) + install worktrees + alarm
 ```
 
+`install.sh` self-provisions on first run: if no fish config override exists it
+runs `./configure.sh --defaults` (non-interactive, default homes), so
+**zero-state setup is a single command**. To customize homes instead, run
+`./configure.sh` interactively first — it prompts and is safe to re-run.
+
 Then reload fish (`source ~/.config/fish/conf.d/worktrees.fish` or open a new
-shell). Re-running `./install.sh` is safe; `git pull` in the repo updates the
-tooling in place (worktrees.fish is symlinked).
+shell) and **quit + restart opencode** (the model-routing plugin and
+instructions load at startup, not hot-reloaded). Re-running `./install.sh` is
+safe; `git pull` in the repo updates the tooling in place (worktrees.fish and
+the alarm plugin are symlinked).
 
 ## Tests
 
@@ -194,3 +209,76 @@ Idea-centric `worktree-list` dashboard; non-mutating
 stale-`main` warning; interactive skip/stash for mid-set stop/rm. Deliberately
 excluded: auto-commit/push/PR, state databases, daemons — Git stays the state
 machine.
+
+## opencode model-routing
+
+DeepSeek Pro/Flash routing alarm. Two pieces, both loaded from the **global**
+opencode config by reference (nothing is copied into `~/.config/opencode/`):
+
+| Piece | File | Loaded via | Handles |
+|---|---|---|---|
+| Alarm plugin | `opencode/model-routing-alarm.js` | symlink into `opencode`'s plugin dir (auto-discovered) | mechanical signals (countable thresholds) |
+| Routing contract | `opencode/model-routing.md` | `opencode.json` → `instructions` | judgment signals + Pro/Flash working agreement |
+
+`./install.sh` installs both: it symlinks the plugin into
+`~/.config/opencode/plugin/` and merges the contract into
+`~/.config/opencode/opencode.json` (atomic write, timestamped backup, no-op on
+re-run). **Quit and restart opencode after installing** — config is read at
+startup, not hot-reloaded.
+
+### How the plugin decides
+
+Per-session state machine over `tool.execute.after`:
+
+| Signal | Trigger | Default threshold | Direction |
+|---|---|---|---|
+| Failing test runs | bash invokes `pytest`/`bazel test`/`vitest`/`jest`/`npm test`/`go test`/`mix test`/`mvn test` and output shows a failure | 2 consecutive | → Pro |
+| Same-file loop | repeated edit/write to the identical `filePath` | 4 consecutive | → Pro |
+| Mechanical green phase | passing test runs while the session model is Pro | 5 consecutive | → Flash |
+
+An alarm is a macOS `osascript` notification **plus** a queued session banner
+(injected via `client.session.prompt`, `noReply` — visible, does not interrupt
+the running agent; the text says acknowledge, don't act). Counters reset on
+alarm, on a passing test, or on a file change; a cooldown (default 10 min)
+prevents spam. The plugin never throws — any failure degrades to a log line in
+`/tmp/model-routing-alarm.log`.
+
+### Configure
+
+Thresholds are env-tunable in the environment that launches opencode:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `MODEL_ROUTING_FAIL_THRESHOLD` | `2` | consecutive failing test runs → Pro |
+| `MODEL_ROUTING_LOOP_THRESHOLD` | `4` | consecutive edits to one file → Pro |
+| `MODEL_ROUTING_GREEN_THRESHOLD` | `5` | consecutive green passes on Pro → Flash |
+| `MODEL_ROUTING_COOLDOWN_MIN` | `10` | minutes between alarms |
+| `MODEL_ROUTING_NOTIFY` | `1` | set `0` to silence the macOS notification (banner only) |
+| `MODEL_ROUTING_DEBUG` | — | `1` for stderr logging |
+
+### Judgment signals (in the contract, not the plugin)
+
+Signals only the model can assess — silent Indic-normalization corruption
+(wrong-but-passing), cross-language contract drift (Python ↔ TypeScript ↔
+Next.js), Bazel build-graph weirdness, and >20 minutes without a hypothesis.
+The contract instructs the agent to emit a loud `⚠️ SWITCH-TO-PRO:` /
+`⚠️ SWITCH-TO-FLASH:` marker with a one-line reason when one fires.
+
+### Verify
+
+1. Restart opencode.
+2. Run a deliberately failing `pytest` twice → notification + banner fire.
+3. Run the same command twice with green output → no alarm.
+
+### Known limitations
+
+- **Plugin runtime behavior is not automated-tested** — `test.sh` covers syntax
+  (`node --check`), install, and config-merge idempotency; the live alarm needs
+  a running opencode server, so it is verified manually per the steps above.
+- **`osascript` may be unavailable** (non-macOS) → the notification is silently
+  skipped; the session banner still works.
+- **Editing the contract** (`model-routing.md`) does not require a restart;
+  editing the plugin or `opencode.json` does.
+- **Uninstall/restore**: remove the `model-routing-alarm.js` symlink, drop the
+  `instructions` entry from `opencode.json` (or restore the timestamped backup
+  `opencode.json.bak-*` left by the merge), then restart opencode.

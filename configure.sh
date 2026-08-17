@@ -10,6 +10,26 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# -- arg parsing ------------------------------------------------------------------
+# `--defaults` runs non-interactively with the default homes (no prompts) and is
+# used by install.sh for one-shot zero-state provisioning. `--help` prints usage.
+
+DEFAULTS=0
+case "${1:-}" in
+    --defaults) DEFAULTS=1 ;;
+    --help|-h)
+        echo "usage: ./configure.sh [--defaults]"
+        echo "  --defaults  run non-interactively with default homes (no prompts)"
+        exit 0 ;;
+    *)
+        if [[ $# -gt 0 ]]; then
+            echo "configure.sh: unknown argument: $1" >&2
+            echo "usage: ./configure.sh [--defaults]" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # -- 0. environment fast-fail ------------------------------------------------------
 # Refuse to configure on unsupported fish/git so failures are clear and
 # immediate, not a cryptic first-use error later.
@@ -50,11 +70,16 @@ echo "environment ok: fish $FISH_VER, git $GIT_VER"
 
 # -- collect values with defaults -------------------------------------------------
 
-read -rp "GitHub home (where main clones live) [$HOME/github]: " answer
-__wt_github_home="${answer:-$HOME/github}"
+if [[ "$DEFAULTS" -eq 1 ]]; then
+    __wt_github_home="$HOME/github"
+    __wt_worktree_home="$HOME/git-worktrees"
+else
+    read -rp "GitHub home (where main clones live) [$HOME/github]: " answer
+    __wt_github_home="${answer:-$HOME/github}"
 
-read -rp "Worktree home (where worktrees live) [$HOME/git-worktrees]: " answer
-__wt_worktree_home="${answer:-$HOME/git-worktrees}"
+    read -rp "Worktree home (where worktrees live) [$HOME/git-worktrees]: " answer
+    __wt_worktree_home="${answer:-$HOME/git-worktrees}"
+fi
 
 # -- write the fish config override ------------------------------------------------
 
@@ -89,4 +114,4 @@ else
 fi
 
 echo
-echo "Next step: run ./install.sh (symlinks worktrees.fish + sets the git plan alias)."
+echo "Next step: run ./install.sh (symlinks worktrees.fish + sets the git plan alias + installs the opencode model-routing alarm)."

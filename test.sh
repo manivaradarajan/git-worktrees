@@ -451,5 +451,134 @@ run_fish "node install skipped when node_modules already present" '
 '
 
 echo
+echo "== opencode model-routing install =="
+
+# plugin syntax gate (skip cleanly if node is absent)
+if command -v node >/dev/null 2>&1; then
+    if node --check "$ROOT/opencode/model-routing-alarm.js" >/dev/null 2>&1; then
+        ok "model-routing-alarm.js parses"
+    else
+        fail "model-routing-alarm.js parse error"
+    fi
+else
+    echo "  skip  node --check (node not on PATH)"
+fi
+
+# merge-instructions.py against a temp config
+OCFG="$WORK/ocfg"; mkdir -p "$OCFG"
+printf '{"$schema":"https://opencode.ai/config.json","username":"t"}\n' > "$OCFG/opencode.json"
+if python3 "$ROOT/opencode/merge-instructions.py" "$OCFG/opencode.json" "$ROOT/opencode/model-routing.md" >/dev/null 2>&1; then
+    ok "merge-instructions.py runs on an existing config"
+else
+    fail "merge-instructions.py failed on an existing config"
+fi
+if grep -q '"instructions"' "$OCFG/opencode.json" && grep -q '"username"' "$OCFG/opencode.json"; then
+    ok "merge adds instructions, preserves existing keys"
+else
+    fail "merge did not add instructions or dropped existing keys"
+fi
+if [ "$(ls "$OCFG"/opencode.json.bak-* 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
+    ok "merge writes exactly one backup on first change"
+else
+    fail "merge backup count != 1 after first change"
+fi
+
+# re-run: no-op, no second backup, byte-identical file
+python3 "$ROOT/opencode/merge-instructions.py" "$OCFG/opencode.json" "$ROOT/opencode/model-routing.md" >/dev/null 2>&1
+if [ "$(ls "$OCFG"/opencode.json.bak-* 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
+    ok "merge re-run is a no-op (no second backup)"
+else
+    fail "merge re-run created a second backup"
+fi
+# merge output must be valid JSON and stable under re-serialization
+if python3 -c "import json,sys; json.load(open('$OCFG/opencode.json'))" >/dev/null 2>&1; then
+    ok "merge output is valid JSON"
+else
+    fail "merge output is not valid JSON"
+fi
+if cmp -s "$OCFG/opencode.json" <(python3 -c "import json;print(json.dumps(json.load(open('$OCFG/opencode.json')),indent=2,ensure_ascii=False)+'\n',end='')"); then
+    ok "merge output is stable under re-serialization"
+else
+    fail "merge output is not stable under re-serialization"
+fi
+
+# absent config -> minimal config created, no backup needed
+rm -f "$OCFG/absent.json"
+if python3 "$ROOT/opencode/merge-instructions.py" "$OCFG/absent.json" "$ROOT/opencode/model-routing.md" >/dev/null 2>&1 \
+   && grep -q '"$schema"' "$OCFG/absent.json" && grep -q '"instructions"' "$OCFG/absent.json"; then
+    ok "merge creates a minimal config when the file is absent"
+else
+    fail "merge did not create a minimal absent config"
+fi
+
+# invalid JSON -> exit nonzero, file left untouched
+printf '{not valid json\n' > "$OCFG/bad.json"
+if python3 "$ROOT/opencode/merge-instructions.py" "$OCFG/bad.json" "$ROOT/opencode/model-routing.md" >/dev/null 2>&1; then
+    fail "merge accepts invalid JSON"
+else
+    ok "merge refuses invalid JSON"
+fi
+if grep -q '{not valid json' "$OCFG/bad.json"; then
+    ok "merge leaves an invalid file untouched"
+else
+    fail "merge modified an invalid file"
+fi
+
+# configure --defaults: non-interactive, writes config + seeds groups
+if HOME="$WORK/home2" bash "$ROOT/configure.sh" --defaults </dev/null >/dev/null 2>&1; then
+    ok "configure.sh --defaults runs non-interactively"
+else
+    fail "configure.sh --defaults failed"
+fi
+if test -f "$WORK/home2/.config/fish/conf.d/worktrees-config.fish" \
+   && test -f "$WORK/home2/git-worktrees/WORKTREE-GROUPS"; then
+    ok "configure --defaults writes config and seeds WORKTREE-GROUPS"
+else
+    fail "configure --defaults did not write config/seed groups"
+fi
+
+# zero-state install: self-provisions config, symlinks plugin, merges instructions
+mkdir -p "$WORK/home3"
+if HOME="$WORK/home3" bash "$ROOT/install.sh" </dev/null >/dev/null 2>&1; then
+    ok "install.sh succeeds from zero state"
+else
+    fail "install.sh failed from zero state"
+fi
+if test -f "$WORK/home3/.config/fish/conf.d/worktrees-config.fish"; then
+    ok "install.sh self-provisions the fish config"
+else
+    fail "install.sh did not self-provision the fish config"
+fi
+if test -L "$WORK/home3/.config/opencode/plugin/model-routing-alarm.js"; then
+    ok "install.sh symlinks the alarm plugin"
+else
+    fail "install.sh did not symlink the alarm plugin"
+fi
+if grep -q '"instructions"' "$WORK/home3/.config/opencode/opencode.json"; then
+    ok "install.sh merges the routing contract into opencode.json"
+else
+    fail "install.sh did not merge instructions into opencode.json"
+fi
+
+# re-run install: config preserved (marker survives), no new backup
+# (a fresh absent config is created with backup=False, so 0 backups total)
+echo '# marker' >> "$WORK/home3/.config/fish/conf.d/worktrees-config.fish"
+if HOME="$WORK/home3" bash "$ROOT/install.sh" </dev/null >/dev/null 2>&1; then
+    ok "install.sh re-run succeeds"
+else
+    fail "install.sh re-run failed"
+fi
+if grep -q '# marker' "$WORK/home3/.config/fish/conf.d/worktrees-config.fish"; then
+    ok "install.sh re-run leaves an existing config untouched"
+else
+    fail "install.sh re-run clobbered an existing config"
+fi
+if [ "$(ls "$WORK/home3/.config/opencode"/opencode.json.bak-* 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; then
+    ok "install.sh re-run creates no opencode.json backup (no-op merge)"
+else
+    fail "install.sh re-run created an unexpected backup"
+fi
+
+echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
