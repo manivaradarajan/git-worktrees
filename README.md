@@ -34,8 +34,8 @@ This repo hosts two tools:
 
 ```
 $__wt_github_home/<repo>            main clones   (default: ~/github)
-$__wt_worktree_home/<repo>/<idea>   worktrees     (default: ~/git-worktrees)
-$__wt_worktree_home/.venvs/<idea>   shared venv   (one per idea)
+$__wt_worktree_home/<idea>/<repo>   worktrees     (default: ~/git-worktrees)
+$__wt_venv_home/<idea>              shared venv   (one per idea)
 $__wt_worktree_home/WORKTREE-GROUPS named repo groups
 ```
 

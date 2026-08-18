@@ -7,7 +7,7 @@
 #
 # Layout:
 #   $__wt_github_home/<repo>              main clones   (default: ~/github)
-#   $__wt_worktree_home/<repo>/<idea>     worktrees     (default: ~/git-worktrees)
+#   $__wt_worktree_home/<idea>/<repo>     worktrees     (default: ~/git-worktrees)
 #   $__wt_venv_home/<idea>                shared venv   (default: ~/git-worktrees/.venvs)
 #
 # Each idea gets ONE shared Python venv that is the union of every participating
@@ -264,7 +264,7 @@ end
 function __wt_ensure_node
     set -l idea $argv[1]
     set -l repo $argv[2]
-    set -l root $__wt_worktree_home/$repo/$idea
+    set -l root (__wt_wt_path $idea $repo)
     test -f $root/package.json; or return 0
     test -d $root/node_modules; and return 0
     set -l manager (__wt_js_manager $root)
@@ -313,6 +313,21 @@ end
 # __wt_venv_path — absolute path of the shared venv for an idea.
 function __wt_venv_path
     echo $__wt_venv_home/$argv[1]
+end
+
+# __wt_wt_path — absolute worktree path for an idea's repo, idea-first:
+#   $__wt_worktree_home/<idea>/<repo>
+# The single source of truth for the layout, so the component order can never
+# drift across call sites. Argument order is ($idea $repo), mirroring the
+# directory order.
+function __wt_wt_path
+    echo $__wt_worktree_home/$argv[1]/$argv[2]
+end
+
+# __wt_idea_path — absolute parent directory for an idea's worktrees:
+#   $__wt_worktree_home/<idea>
+function __wt_idea_path
+    echo $__wt_worktree_home/$argv[1]
 end
 
 # __wt_python_manifest — the kind of Python manifest a repo's main clone has, or
@@ -386,16 +401,19 @@ end
 # or nothing. Works from inside any subdirectory of a worktree. Physical paths
 # (path resolve + pwd -P) dodge the macOS /var -> /private/var mismatch that
 # this file already handles elsewhere. Never treats the venv home itself as a
-# worktree.
+# worktree. Layout is idea-first ($wt_home/<idea>/<repo>), so the idea is the
+# FIRST path component after the worktree home.
 function __wt_idea_for_pwd
     set -l wt_home (path resolve $__wt_worktree_home 2>/dev/null)
     test -n "$wt_home"; or return 0
     set -l here (pwd -P)
+    # note: `string match` wildcards cross '/', so this also matches
+    # idea/repo/sub/dir — the subdir case is intentional, not a bug to "fix".
     if string match -q -- "$wt_home/*/*" $here
         set -l rel (string replace -- "$wt_home/" '' $here)
         set -l parts (string split / $rel)
         if test (count $parts) -ge 2; and not test "$parts[1]" = (basename $__wt_venv_home)
-            echo $parts[2]
+            echo $parts[1]
         end
     end
 end
@@ -611,7 +629,7 @@ function worktree-start
     # phase 0 — validate the whole set before mutating anything
     for repo in $repos
         set -l main_root $__wt_github_home/$repo
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         test -d $main_root
         or begin
             echo "worktree-start: no main clone at $main_root" >&2
@@ -660,8 +678,9 @@ function worktree-start
         end
     end
     # phase 1 — create/attach (all validated above)
+    mkdir -p (__wt_idea_path $idea)   # idea-first parent dir (explicit, not implicit)
     for repo in $repos
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         test -e $path; and continue   # already a valid worktree for this idea
         if git -C $__wt_github_home/$repo show-ref --verify --quiet refs/heads/$idea
             git -C $__wt_github_home/$repo worktree add $path $idea
@@ -677,13 +696,13 @@ function worktree-start
     # JS deps — best-effort install in every repo of the set with a package.json
     for repo in $repos
         if not __wt_ensure_node $idea $repo
-            echo "warning: could not install JS deps in $__wt_worktree_home/$repo/$idea (install manually)" >&2
+            echo "warning: could not install JS deps in "(__wt_wt_path $idea $repo)" (install manually)" >&2
         end
     end
     if test (count $repos) -gt 1
         echo "paired worktrees:"
         for repo in $repos
-            echo "  $__wt_worktree_home/$repo/$idea"
+            echo "  "(__wt_wt_path $idea $repo)
         end
     end
     if set -q _flag_save; and set -q _flag_repos
@@ -693,7 +712,7 @@ function worktree-start
     if not contains -- $self $repos
         set target $repos[1]
     end
-    cd $__wt_worktree_home/$target/$idea
+    cd (__wt_wt_path $idea $target)
     git status -sb
     git plan
 end
@@ -719,7 +738,7 @@ function worktree-go
         return 1
     end
     set -l self (__wt_repo_name); or return 1
-    set -l path $__wt_worktree_home/$self/$idea
+    set -l path (__wt_wt_path $idea $self)
     test -d $path
     or begin
         echo "worktree-go: no worktree at $path" >&2
@@ -771,7 +790,7 @@ function worktree-merge
     # phase 0 — preflight everything before touching any main
     for repo in $repos
         set -l main_root $__wt_github_home/$repo
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         test -d $path
         or begin
             echo "worktree-merge: no worktree at $path" >&2
@@ -795,7 +814,7 @@ function worktree-merge
     end
     # phase 1 — rebase all (no main mutated yet)
     for repo in $repos
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         git -C $path rebase main
         or begin
             echo "worktree-merge: rebase failed in $repo (conflict?) — no main branch was merged; some idea branches may already be rebased" >&2
@@ -846,7 +865,7 @@ function worktree-stop
     end
     set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group"); or return 1
     for repo in $repos
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         test -d $path
         or begin
             echo "worktree-stop: no worktree at $path" >&2
@@ -866,6 +885,7 @@ function worktree-stop
         end
         echo "parked $path (branch kept)"
     end
+    rmdir (__wt_idea_path $idea) 2>/dev/null   # drop empty idea dir (mid-set safe)
     echo "update $__wt_worktree_home/WORKTREES.md rows if parked"
 end
 # worktree-rm — tear down a worktree and delete its branch.
@@ -902,7 +922,7 @@ function worktree-rm
     end
     set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group"); or return 1
     for repo in $repos
-        set -l path $__wt_worktree_home/$repo/$idea
+        set -l path (__wt_wt_path $idea $repo)
         test -d $path
         or begin
             echo "worktree-rm: no worktree at $path" >&2
@@ -944,6 +964,7 @@ function worktree-rm
             echo "removed venv $venv"
         end
     end
+    rmdir (__wt_idea_path $idea) 2>/dev/null   # drop empty idea dir (mid-set safe)
     echo "update $__wt_worktree_home/WORKTREES.md — remove $idea rows"
 end
 # worktree-list — global recall: print the idea registry ($__wt_worktree_home/
@@ -962,15 +983,29 @@ function worktree-list
         echo "(no WORKTREES.md at $registry — create one to track ideas)"
         echo
     end
-    for repo in $__wt_worktree_home/*
-        test -d $repo; or continue
-        set -l name (basename $repo)
-        if test "$name" = (basename $__wt_venv_home)
-            continue   # shared venv dir is not a repo
+    # idea-first layout: $__wt_worktree_home/<idea>/<repo>. Iterate ideas, then
+    # each idea's repos, filtering each repo's list to THIS idea's paths (a
+    # repo's `git worktree list` covers all of its registered worktrees across
+    # every idea). Fully parked ideas have no dirs and rely on WORKTREES.md
+    # above. Non-directory entries (WORKTREES.md, WORKTREE-GROUPS) and the venv
+    # home are skipped.
+    set -l venv_home (basename $__wt_venv_home)
+    if test -d $__wt_worktree_home
+        for idea_dir in $__wt_worktree_home/*
+            test -d $idea_dir; or continue
+            set -l idea (basename $idea_dir)
+            if test "$idea" = "$venv_home"
+                continue   # shared venv dir is not an idea
+            end
+            echo "== $idea =="
+            for repo_dir in $idea_dir/*
+                test -d $repo_dir; or continue
+                set -l repo (basename $repo_dir)
+                git -C $__wt_github_home/$repo worktree list 2>/dev/null \
+                    | string match -e "/$idea/"
+            end
+            echo
         end
-        echo "== $name =="
-        git -C $__wt_github_home/$name worktree list 2>/dev/null
-        echo
     end
 end
 # worktree-venv — ensure/refresh the shared per-idea venv for a repo set.
@@ -1021,8 +1056,12 @@ function worktree-venv
     end
 end
 # --- completions ------------------------------------------------------------
+# __fish_print_worktrees — ideas that have a worktree for the CURRENT repo
+# (idea-first layout: $__wt_worktree_home/<idea>/<repo>), for completion of
+# start/go/stop/rm/merge/venv. Nothing (empty completion) when not in a repo.
 function __fish_print_worktrees
-    path basename $__wt_worktree_home/(__wt_repo_name)/* 2>/dev/null
+    set -l repo (__wt_repo_name 2>/dev/null); or return 1
+    path dirname $__wt_worktree_home/*/$repo 2>/dev/null | path basename
 end
 
 function __fish_print_groups

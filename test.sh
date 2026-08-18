@@ -182,7 +182,8 @@ run_fish "start creates worktree on idea branch" '
     cd "$__wt_github_home/repo-a"
     worktree-start idea-one >/dev/null 2>&1; or exit 1
     test (git branch --show-current) = idea-one; or exit 1
-    test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1
+    test -d "$__wt_worktree_home/idea-one/repo-a"; or exit 1
+    not test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1   # old repo-first layout never created
 '
 
 run_fish "start is idempotent (re-run ok)" '
@@ -193,13 +194,13 @@ run_fish "start is idempotent (re-run ok)" '
 run_fish "multi-repo start creates both worktrees" '
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-a,repo-b idea-two >/dev/null 2>&1; or exit 1
-    test -d "$__wt_worktree_home/repo-b/idea-two"; or exit 1
+    test -d "$__wt_worktree_home/idea-two/repo-b"; or exit 1
 '
 
 run_fish "missing repo preflights (creates nothing)" '
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-a,ghost idea-three >/dev/null 2>&1; and exit 1
-    not test -d "$__wt_worktree_home/repo-a/idea-three"; or exit 1
+    not test -d "$__wt_worktree_home/idea-three/repo-a"; or exit 1
 '
 
 run_fish "invalid idea rejected" '
@@ -209,18 +210,18 @@ run_fish "invalid idea rejected" '
 
 run_fish "existing bogus destination rejected" '
     cd "$__wt_github_home/repo-a"
-    mkdir -p "$__wt_worktree_home/repo-a/bogus"
+    mkdir -p "$__wt_worktree_home/bogus/repo-a"
     worktree-start bogus >/dev/null 2>&1; and exit 1
 '
 
 run_fish "go enters this repo worktree" '
     cd "$__wt_github_home/repo-a"
     worktree-go idea-one >/dev/null 2>&1; or exit 1
-    test (basename (pwd)) = idea-one; or exit 1
+    test (basename (dirname (pwd))) = idea-one; or exit 1   # idea-first: parent is the idea
 '
 
 run_fish "git plan matches registry row" '
-    cd "$__wt_worktree_home/repo-a/idea-one"
+    cd "$__wt_worktree_home/idea-one/repo-a"
     set -l row (git plan 2>/dev/null | string match -r "idea-one.*Test idea one"); or exit 1
 '
 
@@ -240,7 +241,7 @@ run_fish "merge refuses when main clone not on main" '
 
 run_fish "coordinated merge fast-forwards main" '
     cd "$__wt_github_home/repo-a"
-    git -C "$__wt_worktree_home/repo-a/idea-one" commit -q --allow-empty -m wip
+    git -C "$__wt_worktree_home/idea-one/repo-a" commit -q --allow-empty -m wip
     worktree-merge idea-one >/dev/null 2>&1; or exit 1
     git merge-base --is-ancestor idea-one main; or exit 1
 '
@@ -248,17 +249,17 @@ run_fish "coordinated merge fast-forwards main" '
 run_fish "stop removes dir, keeps branch" '
     cd "$__wt_github_home/repo-a"
     worktree-stop idea-one >/dev/null 2>&1; or exit 1
-    not test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1
+    not test -d "$__wt_worktree_home/idea-one/repo-a"; or exit 1
     git branch --list idea-one | string match -q "*idea-one"; or exit 1
 '
 
 run_fish "stop refuses dirty worktree without --force" '
     cd "$__wt_github_home/repo-a"
     worktree-start idea-one >/dev/null 2>&1
-    echo wip >> "$__wt_worktree_home/repo-a/idea-one/base.txt"
+    echo wip >> "$__wt_worktree_home/idea-one/repo-a/base.txt"
     worktree-stop idea-one >/dev/null 2>&1; and exit 1
     worktree-stop --force idea-one >/dev/null 2>&1; or exit 1
-    not test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1
+    not test -d "$__wt_worktree_home/idea-one/repo-a"; or exit 1
 '
 
 run_fish "resume re-attaches parked branch" '
@@ -270,8 +271,43 @@ run_fish "resume re-attaches parked branch" '
 run_fish "rm removes worktree and merged branch" '
     cd "$__wt_github_home/repo-a"
     worktree-rm idea-one </dev/null >/dev/null 2>&1; or exit 1
-    not test -d "$__wt_worktree_home/repo-a/idea-one"; or exit 1
+    not test -d "$__wt_worktree_home/idea-one/repo-a"; or exit 1
     not git branch --list idea-one | string match -q "*idea-one"; or exit 1
+'
+
+echo "== idea-first layout =="
+
+run_fish "__wt_wt_path is the single layout source (idea-first)" '
+    test (__wt_wt_path idea-helper repo-a) = "$__wt_worktree_home/idea-helper/repo-a"; or exit 1
+    test (__wt_wt_path some-idea repo-b) = "$__wt_worktree_home/some-idea/repo-b"; or exit 1
+'
+
+run_fish "__wt_idea_for_pwd resolves the idea from a new-layout subdir" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a idea-helper >/dev/null 2>&1; or exit 1
+    mkdir -p "$__wt_worktree_home/idea-helper/repo-a/sub"
+    cd "$__wt_worktree_home/idea-helper/repo-a/sub"
+    test (__wt_idea_for_pwd) = idea-helper; or exit 1
+'
+
+run_fish "worktree-list groups worktrees by idea" '
+    set -l out (worktree-list 2>/dev/null)
+    string match -q "*== idea-helper ==*" "$out"; or exit 1
+    string match -q "*idea-helper*repo-a*" "$out"; or exit 1
+'
+
+run_fish "worktree-list is best-effort with a missing worktree home" '
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/nonexistent-wt"
+    worktree-list >/dev/null 2>&1; or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "__fish_print_worktrees completes ideas (not repo names) for the current repo" '
+    cd "$__wt_github_home/repo-a"
+    set -l ideas (__fish_print_worktrees)
+    contains -- idea-helper $ideas; or exit 1
+    not contains -- repo-a $ideas; or exit 1
 '
 
 echo "== shared python venv =="
@@ -293,17 +329,17 @@ run_fish "union venv from multiple manifests, auto-activated on cd" '
 '
 
 run_fish "venv deactivates on leaving, swaps on idea switch, works in subdirs" '
-    cd "$__wt_worktree_home/repo-req/idea-python"
+    cd "$__wt_worktree_home/idea-python/repo-req"
     test -n "$VIRTUAL_ENV"; or exit 1
-    mkdir -p "$__wt_worktree_home/repo-req/idea-python/sub"
-    cd "$__wt_worktree_home/repo-req/idea-python/sub"
+    mkdir -p "$__wt_worktree_home/idea-python/repo-req/sub"
+    cd "$__wt_worktree_home/idea-python/repo-req/sub"
     test -n "$VIRTUAL_ENV"; or exit 1
     cd "$__wt_github_home/repo-req"
     test -z "$VIRTUAL_ENV"; or exit 1
     worktree-start --repos=repo-req idea-python2 >/dev/null 2>&1; or exit 1
-    cd "$__wt_worktree_home/repo-req/idea-python"
+    cd "$__wt_worktree_home/idea-python/repo-req"
     test -n "$VIRTUAL_ENV"; or exit 1
-    cd "$__wt_worktree_home/repo-req/idea-python2"
+    cd "$__wt_worktree_home/idea-python2/repo-req"
     string match -q "*idea-python2" "$VIRTUAL_ENV"; or exit 1
 '
 
@@ -337,7 +373,7 @@ run_fish "python3 missing fast-fails phase 0 (nothing created)" '
     command -sq python3; and exit 1
     worktree-start --repos=repo-req,repo-req2 idea-nopython >/dev/null 2>&1; and exit 1
     not test -d "$__wt_venv_home/idea-nopython"; or exit 1
-    not test -d "$__wt_worktree_home/repo-req/idea-nopython"; or exit 1
+    not test -d "$__wt_worktree_home/idea-nopython/repo-req"; or exit 1
 '
 
 echo "== repo-local .venv auto-activation =="
@@ -374,7 +410,7 @@ run_fish "main clone .venv and shared idea venv swap cleanly (no PATH dup)" '
     worktree-start --repos=repo-req idea-rvswap >/dev/null 2>&1; or exit 1
     cd "$__wt_github_home/repo-req"
     test -z "$VIRTUAL_ENV"; or exit 1
-    cd "$__wt_worktree_home/repo-req/idea-rvswap"
+    cd "$__wt_worktree_home/idea-rvswap/repo-req"
     test -n "$VIRTUAL_ENV"; or exit 1
     test (count (string match -- "$__wt_venv_home/idea-rvswap/bin" $PATH)) -le 1; or exit 1
     cd "$__wt_github_home/repo-a"
@@ -385,7 +421,7 @@ run_fish "main clone .venv and shared idea venv swap cleanly (no PATH dup)" '
 run_fish "worktree with no .venv (no python manifest) stays un-activated" '
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-a idea-rvbare >/dev/null 2>&1; or exit 1
-    cd "$__wt_worktree_home/repo-a/idea-rvbare"
+    cd "$__wt_worktree_home/idea-rvbare/repo-a"
     test -z "$VIRTUAL_ENV"; or exit 1
 '
 
@@ -512,10 +548,10 @@ run_fish "node installs in every repo with package.json, manager per lockfile" '
     set -gx PATH "$WT_NODEBIN:$PATH"
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-js,repo-js-bare,repo-pnpm,repo-a idea-js >/dev/null 2>&1; or exit 1
-    test -d "$__wt_worktree_home/repo-js/idea-js/node_modules"; or exit 1
-    test -d "$__wt_worktree_home/repo-js-bare/idea-js/node_modules"; or exit 1
-    test -d "$__wt_worktree_home/repo-pnpm/idea-js/node_modules"; or exit 1
-    not test -d "$__wt_worktree_home/repo-a/idea-js/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/idea-js/repo-js/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/idea-js/repo-js-bare/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/idea-js/repo-pnpm/node_modules"; or exit 1
+    not test -d "$__wt_worktree_home/idea-js/repo-a/node_modules"; or exit 1
     string match -q "*npm ci*" (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
     string match -qr '^npm install$' (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
     string match -q "*pnpm install --frozen-lockfile*" (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
@@ -528,7 +564,7 @@ run_fish "lockfile manager missing falls back to npm" '
     set -gx PATH "$WORK/npmonly:$WT_TESTBIN:/usr/bin:/bin:/usr/sbin"
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-pnpm,repo-a idea-jsfb >/dev/null 2>&1; or exit 1
-    test -d "$__wt_worktree_home/repo-pnpm/idea-jsfb/node_modules"; or exit 1
+    test -d "$__wt_worktree_home/idea-jsfb/repo-pnpm/node_modules"; or exit 1
     string match -qr '^npm install$' (cat "$WT_NODEBIN/npm-calls.log" 2>/dev/null); or exit 1
 '
 
@@ -536,7 +572,7 @@ run_fish "no JS manager on PATH skips install with warning" '
     set -gx PATH "$WT_TESTBIN:/usr/bin:/bin:/usr/sbin"
     cd "$__wt_github_home/repo-a"
     worktree-start --repos=repo-js,repo-a idea-jsnm >/dev/null 2>&1; or exit 1
-    not test -d "$__wt_worktree_home/repo-js/idea-jsnm/node_modules"; or exit 1
+    not test -d "$__wt_worktree_home/idea-jsnm/repo-js/node_modules"; or exit 1
 '
 
 run_fish "node install skipped when node_modules already present" '
