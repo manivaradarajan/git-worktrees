@@ -112,7 +112,7 @@ Repo selection is mutually exclusive and defaults to the current repo only:
 |---|---|
 | `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] <idea>` | Create/resume the worktree(s), cd in, install JS deps in **every repo of the set** with a `package.json` (npm ci with a lockfile, else npm install; pnpm/yarn/bun chosen per lockfile, npm fallback if the manager is missing), provision the shared Python venv (see below), print paired dirs. Two-phase: validates the whole repo set before creating anything. |
 | `worktree-go <idea>` | cd into this repo's worktree, show status + registry row. The shared venv auto-activates. |
-| `worktree-venv [--repos=A,B,C \| -g NAME] [--force] <idea>` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. |
+| `worktree-venv [--repos=A,B,C \| -g NAME] [--force] <idea>` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. Honors a `.python-version` pin (recreates on minor mismatch). |
 | `worktree-merge [--repos=A,B,C \| -g NAME] <idea>` | Coordinated rebase-onto-local-`main` then `--ff-only` merge into each main. No push. Not a cross-repo transaction. |
 | `worktree-stop [--repos=A,B,C \| -g NAME] [--force] <idea>` | Park: remove the worktree dir, keep the branch. Refuses if dirty unless `--force`. |
 | `worktree-rm [--repos=A,B,C \| -g NAME] [--force] <idea>` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`), then remove the shared venv. |
@@ -160,6 +160,23 @@ Installer: **uv** when on PATH (creates the venv and re-syncs deps on every
 only on create, or with `worktree-venv --force`). If any repo has a Python
 manifest but **neither `uv` nor `python3`** is available, `worktree-start`
 **fast-fails before creating anything**.
+
+**Interpreter pinning (`.python-version`):** if any repo in the set carries a
+`.python-version` pin (e.g. `3.13`), the shared venv is created on that
+interpreter, and an existing venv on a different major.minor is **recreated**
+onto the pin. Pin when a dependency lacks prebuilt wheels for the newest local
+Python (example: `pydantic-core`/`jaconv` have no macOS **cp314** wheel, so a
+3.14 venv compiles `pydantic-core` from Rust on every fresh install — minutes
+of CPU). Pinning to `3.13` keeps `uv` on prebuilt wheels so provisioning is
+instant. The pin is read from the first repo in the set that has one (repo
+order matters).
+
+**Removing the pin later:** the reminder to re-evaluate lives as a comment in
+the pinned repo's manifest itself (`pyproject.toml` / `requirements.txt`). When
+the ecosystem catches up (a wheel exists for the newer interpreter), delete the
+pin and run `worktree-venv --force <idea>` to rebuild the venv on the newer
+Python. Removing the pin is safe at any time — the venv keeps its current
+interpreter until you force-recreate it.
 
 Shell integration: a `PWD`-change handler auto-activates the venv whenever you
 cd into any of the idea's worktrees (or a subdirectory of one) and deactivates

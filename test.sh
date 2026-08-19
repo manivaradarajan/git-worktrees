@@ -10,7 +10,9 @@
 # merge / stop+resume / rm / shared python venv (union resolution, auto-activation,
 # pip fallback, python3 fast-fail) / repo-local .venv auto-activation (incl. the
 # inherited-PATH clobber regression) / JS deps / environment fast-fail guards.
-# All installs are offline (manifests are dependency-free).
+# All installs are offline (manifests are dependency-free); the `.python-version`
+# pin tests additionally require `uv` and a local non-3.13 interpreter (or are
+# skipped).
 #
 # Usage:   ./test.sh
 # no `-e` on purpose: run_fish + ok/fail manage status explicitly; `-e` would
@@ -70,7 +72,7 @@ done
 
 # python repos for shared-venv coverage — manifests are dependency-free so all
 # installs are offline and instant
-for r in repo-req repo-req2 repo-py; do
+for r in repo-req repo-req2 repo-py repo-pin; do
     git init -q -b main "$GITHUB_HOME/$r"
     git -C "$GITHUB_HOME/$r" config user.email t@t
     git -C "$GITHUB_HOME/$r" config user.name t
@@ -89,7 +91,19 @@ name = "testpkg"
 version = "0.0.1"
 dependencies = []
 EOF
-for r in repo-req repo-req2 repo-py; do
+# repo-pin -> dependency-free pyproject PLUS a .python-version interpreter pin.
+# Used to exercise the pin honoring and wrong-minor recreation. The pin
+# ($PIN_VERSION) must resolve to an installed interpreter; uv picks it from the
+# real system Pythons.
+cat > "$GITHUB_HOME/repo-pin/pyproject.toml" <<'EOF'
+[project]
+name = "testpkg-pin"
+version = "0.0.1"
+dependencies = []
+EOF
+PIN_VERSION=3.13
+echo "$PIN_VERSION" > "$GITHUB_HOME/repo-pin/.python-version"
+for r in repo-req repo-req2 repo-py repo-pin; do
     git -C "$GITHUB_HOME/$r" add -A
     git -C "$GITHUB_HOME/$r" commit -qm python-manifests
 done
@@ -375,6 +389,29 @@ run_fish "python3 missing fast-fails phase 0 (nothing created)" '
     not test -d "$__wt_venv_home/idea-nopython"; or exit 1
     not test -d "$__wt_worktree_home/idea-nopython/repo-req"; or exit 1
 '
+
+PIN_VERSION=3.13
+if command -v uv >/dev/null 2>&1; then
+run_fish ".python-version pin: venv is created on the pinned minor" '
+    cd "$__wt_github_home/repo-pin"
+    worktree-start --repos=repo-pin idea-repin >/dev/null 2>&1; or exit 1
+    set -l v ($__wt_venv_home/idea-repin/bin/python -c "import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")" 2>/dev/null)
+    test "$v" = "'"$PIN_VERSION"'"; or exit 1
+'
+
+run_fish ".python-version pin: wrong-minor venv is recreated to the pin" '
+    set -l other (uv python find --no-project --system "<=3.12" 2>/dev/null)
+    test -n "$other"; or exit 0   # no non-pinned system Python: branch untestable, skip
+    uv venv --python $other $__wt_venv_home/idea-mismatch 2>/dev/null; or exit 1
+    set -l before ($__wt_venv_home/idea-mismatch/bin/python -c "import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")" 2>/dev/null)
+    test "$before" != "'"$PIN_VERSION"'"; or exit 1
+    __wt_ensure_venv idea-mismatch repo-pin >/dev/null 2>&1; or exit 1
+    set -l after ($__wt_venv_home/idea-mismatch/bin/python -c "import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")" 2>/dev/null)
+    test "$after" = "'"$PIN_VERSION"'"; or exit 1
+'
+else
+    echo "  skip  .python-version pin tests (uv not on PATH)"
+fi
 
 echo "== repo-local .venv auto-activation =="
 

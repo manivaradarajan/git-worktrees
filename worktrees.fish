@@ -359,10 +359,55 @@ function __wt_venv_args
     printf '%s\n' $args
 end
 
+# __wt_python_version — the interpreter pin for a repo set, taken from the
+# first repo in the set that has a `.python-version` (repo order matters).
+# Prints the FIRST non-empty line (e.g. "3.13") or nothing. Keeping the shared
+# venv on the same interpreter the repos are developed against lets uv resolve
+# prebuilt wheels instead of compiling source wheels from Rust (e.g.
+# pydantic-core has no macOS cp314 wheel, so a 3.14 venv compiles it on every
+# fresh install).
+#
+# Usage:   __wt_python_version <repo>...
+# Exit codes: 0 always; found-or-not is signalled by empty output.
+function __wt_python_version
+    for repo in $argv
+        set -l f $__wt_github_home/$repo/.python-version
+        if test -f $f
+            string trim < $f | string match -rv '^$' | head -n1
+            return 0
+        end
+    end
+end
+
+# __wt_python_major_minor — "major.minor" version of a python binary, or
+# nothing. Requires a readable interpreter at the given path.
+#
+# Usage:   __wt_python_major_minor <python-path>
+# Exit codes: 0 ok; 1 not executable / not readable.
+function __wt_python_major_minor
+    set -l py $argv[1]
+    test -x $py; or return 1
+    $py -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null
+end
+
+# __wt_version_major_minor — leading "major.minor" of a version string
+# ("3.13.11" -> "3.13"). Prints nothing on malformed input.
+#
+# Usage:   __wt_version_major_minor <version>
+# Exit codes: 0 ok; 1 fewer than two dot-separated components.
+function __wt_version_major_minor
+    set -l parts (string split . $argv[1])
+    test (count $parts) -ge 2; or return 1
+    echo $parts[1].$parts[2]
+end
+
 # __wt_ensure_venv — create/refresh the shared per-idea venv as the union of
 # every Python manifest in the repo set. uv-first, python3+pip fallback.
 # With uv, re-syncs on every call (fast, self-heals set changes). With pip,
 # installs only on create or --force (pip reinstall of grantha-data is slow).
+# A `.python-version` pin in any participating repo is honored (uv branch
+# only): an existing venv on a different major.minor is recreated so uv can use
+# prebuilt wheels. The pip fallback always uses the default `python3`.
 # Progress goes to stderr so stdout stays clean for callers.
 #
 # Usage:   __wt_ensure_venv [--force] <idea> <repos...>
@@ -376,10 +421,36 @@ function __wt_ensure_venv
     test (count $repos) -gt 0; or return 0
     set -l args (__wt_venv_args $repos)
     test -n "$args"; or return 0   # no Python manifests -> no venv to make
+    set -l pyver (__wt_python_version $repos)
     if command -sq uv
+        set -l rebuild 0
         if not test -d $venv
+            set rebuild 1
+        else
+            set -l cur (__wt_python_major_minor $venv/bin/python)
+            set -l want (__wt_version_major_minor $pyver)
+            if set -q _flag_force
+                echo "recreating venv $venv (uv --force)" >&2
+                set rebuild 1
+            else if test -z "$cur"; and test -z "$want"
+                echo "recreating venv $venv: interpreter missing" >&2
+                set rebuild 1
+            else if test -z "$cur"
+                echo "recreating venv $venv: no usable Python (pinned $pyver)" >&2
+                set rebuild 1
+            else if test -n "$want"; and test "$cur" != "$want"
+                echo "recreating venv $venv: Python $cur does not match pinned $pyver" >&2
+                set rebuild 1
+            end
+        end
+        if test $rebuild -eq 1
+            test -d $venv; and rm -rf $venv
             echo "creating venv $venv (uv)" >&2
-            uv venv $venv; or return 1
+            if test -n "$pyver"
+                uv venv --python $pyver $venv; or return 1
+            else
+                uv venv $venv; or return 1
+            end
         end
         echo "installing Python deps for '$idea' (uv)" >&2
         uv pip install --python $venv/bin/python $args; or return 1
@@ -1018,7 +1089,8 @@ end
 # Usage:   worktree-venv [--repos=A,B,C | -g NAME] [--force] <idea>
 # Flags:   --repos=A,B,C  explicit repo set for this invocation (ephemeral)
 #          -g NAME        named group from WORKTREE-GROUPS
-#          --force        with pip fallback, reinstall even if venv exists
+#          --force        reinstall deps (pip) / recreate the venv (uv, e.g. to
+#                         re-pick the interpreter after removing a pin)
 # Exit codes: 0 ok; 1 usage error, invalid idea, unknown group, or no Python
 # manifests in the set.
 function worktree-venv
