@@ -442,6 +442,18 @@ run_fish "clobber regression: stale inherited venv state preserves PATH" '
     not string match -q "*ghost-venv/bin*" "$PATH"; or exit 1
 '
 
+run_fish "re-asserts fish_user_paths (bun/.local pattern) through venv cycle" '
+    mkdir -p "$WORK/fap-sentinel"
+    fish_add_path "$WORK/fap-sentinel"
+    set -gx PATH "/usr/bin"
+    set -gx VIRTUAL_ENV "$WORK/ghost-venv"
+    set -gx _OLD_VIRTUAL_PATH "/usr/bin"
+    cd "$__wt_github_home/repo-a"
+    string match -q "*$WORK/fap-sentinel*" "$PATH"; or exit 1
+    cd "$__wt_github_home/repo-b"
+    string match -q "*$WORK/fap-sentinel*" "$PATH"; or exit 1
+'
+
 run_fish "main clone .venv and shared idea venv swap cleanly (no PATH dup)" '
     cd "$__wt_github_home/repo-req"
     worktree-start --repos=repo-req idea-rvswap >/dev/null 2>&1; or exit 1

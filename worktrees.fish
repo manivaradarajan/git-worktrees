@@ -89,6 +89,29 @@ function __wt_scrub_inherited_venv_state
 end
 __wt_scrub_inherited_venv_state
 
+# --- global-tools re-assertion ---------------------------------------------
+# Scrubbing stale inherited *_OLD_* vars stops the *next* activation from
+# restoring a poisoned PATH, but a shell spawned inside an active venv may
+# already have dropped the global tool dirs from PATH (anything added via
+# `fish_add_path`, i.e. `$fish_user_paths`, is vulnerable to an ad-hoc
+# `set PATH` clobber by a stale `deactivate`). Re-assert `$fish_user_paths`
+# so a poisoned shell heals itself at load and after every venv change; the
+# `contains` guard keeps the prepend idempotent (no duplicated PATH entries).
+# Prepend all missing dirs in one assignment so `$fish_user_paths` priority
+# order (first = highest) is preserved.
+function __wt_ensure_global_tools
+    set -l missing
+    for d in $fish_user_paths
+        if not contains -- $d $PATH
+            set -a missing $d
+        end
+    end
+    if set -q missing[1]
+        set -gx PATH $missing $PATH
+    end
+end
+__wt_ensure_global_tools
+
 # --- configuration ---------------------------------------------------------
 # Roots for main clones and worktrees. configure.sh writes these to
 # ~/.config/fish/conf.d/worktrees-config.fish, which loads AFTER config.fish —
@@ -500,6 +523,7 @@ function __wt_deactivate_venv
     set -q __wt_active_venv; or return 0
     set -l old_venv $__wt_active_venv
     functions -q deactivate; and deactivate
+    __wt_ensure_global_tools
     set -e __wt_active_venv
     # stderr: these live in __wt_activate_venv/__wt_deactivate_venv, which are
     # also called from worktree-venv where stdout is DATA (the venv path).
@@ -557,6 +581,7 @@ function __wt_activate_venv
         end
     end
     __wt_scrub_inherited_venv_state
+    __wt_ensure_global_tools
     # Disable activate.fish's prompt override: this manager activates venvs
     # programmatically on every cd, and the prompt override's
     # `functions -c fish_prompt _old_fish_prompt` collides when a stale
