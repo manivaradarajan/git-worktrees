@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "provider": {
+    "deepseek": {
+      "npm": "@ai-sdk/anthropic",
+      "name": "DeepSeek",
+      "options": {
+        "baseURL": "https://api.deepseek.com/anthropic"
+      },
+      "models": {
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro",
+          "limit": {
+            "context": 1048576,
+            "output": 16384
+          },
+          "options": {
+            "thinking": {
+              "type": "enabled",
+              "budgetTokens": 16384
+            }
+          }
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash",
+          "limit": {
+            "context": 1048576,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "instructions": [
+    "/Users/mani/github/git-worktrees/opencode/model-routing.md"
+  ]
+}
