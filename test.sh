@@ -317,11 +317,22 @@ run_fish "worktree-list is best-effort with a missing worktree home" '
     set -g __wt_worktree_home $saved
 '
 
-run_fish "__fish_print_worktrees completes ideas (not repo names) for the current repo" '
+run_fish "__fish_print_worktrees completes all ideas (not repo names) from any cwd" '
     cd "$__wt_github_home/repo-a"
     set -l ideas (__fish_print_worktrees)
     contains -- idea-helper $ideas; or exit 1
     not contains -- repo-a $ideas; or exit 1
+    cd "$WORK/home"   # neutral dir, not a repo
+    set -l ideas (__fish_print_worktrees)
+    contains -- idea-helper $ideas; or exit 1
+    not contains -- repo-a $ideas; or exit 1
+'
+
+run_fish "go works from a neutral directory (falls back to a participating repo)" '
+    cd "$WORK/home"   # not a git repo
+    worktree-go idea-helper >/dev/null 2>&1; or exit 1
+    test (basename (dirname (pwd))) = idea-helper; or exit 1
+    test (basename (pwd)) = repo-a; or exit 1
 '
 
 echo "== shared python venv =="

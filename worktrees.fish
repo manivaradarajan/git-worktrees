@@ -812,19 +812,17 @@ function worktree-start
     git status -sb
     git plan
 end
-# worktree-go — cd into this repo's worktree for an idea and refresh context.
+# worktree-go — cd into a worktree for an idea and refresh context. Works from
+# ANY directory, not just a participating repo: from inside a repo that has a
+# worktree for the idea it goes to that one; otherwise it falls back to the
+# first repo in the idea's set that does. The shared venv auto-activates on cd.
 #
 # Usage:   worktree-go <idea>
 # Example: worktree-go whitespace-normalization
-# Exit codes: 0 ok; 1 usage error, unknown idea, or not a worktree.
+# Exit codes: 0 ok; 1 usage error, invalid idea, or no worktree for the idea.
 function worktree-go
     if not set -q argv[1]
         echo "usage: worktree-go <idea>" >&2
-        return 1
-    end
-    git rev-parse --is-inside-work-tree >/dev/null 2>&1
-    or begin
-        echo "worktree-go: not inside a git repository" >&2
         return 1
     end
     set -l idea $argv[1]
@@ -833,13 +831,23 @@ function worktree-go
         echo "worktree-go: invalid idea name '$idea'" >&2
         return 1
     end
-    set -l self (__wt_repo_name); or return 1
-    set -l path (__wt_wt_path $idea $self)
-    test -d $path
+    set -l target (__wt_repo_name 2>/dev/null)
+    if test -z "$target"; or not test -d (__wt_wt_path $idea $target)
+        # neutral cwd (e.g. a fresh terminal at ~) or a repo with no worktree
+        # for this idea -> use the first repo that has one
+        set target ""
+        for repo_dir in (__wt_idea_path $idea)/*
+            test -d $repo_dir; or continue
+            set target (basename $repo_dir)
+            break
+        end
+    end
+    test -n "$target"
     or begin
-        echo "worktree-go: no worktree at $path" >&2
+        echo "worktree-go: no worktree for idea '$idea' (run worktree-start first)" >&2
         return 1
     end
+    set -l path (__wt_wt_path $idea $target)
     cd $path
     git status -sb
     git plan
@@ -1153,12 +1161,20 @@ function worktree-venv
     end
 end
 # --- completions ------------------------------------------------------------
-# __fish_print_worktrees — ideas that have a worktree for the CURRENT repo
-# (idea-first layout: $__wt_worktree_home/<idea>/<repo>), for completion of
-# start/go/stop/rm/merge/venv. Nothing (empty completion) when not in a repo.
+# __fish_print_worktrees — every idea that has a worktree, for completion of
+# start/go/stop/rm/merge/venv. Idea-first layout: $__wt_worktree_home/<idea>.
+# Lists ALL ideas regardless of cwd so a fresh terminal (not inside a repo)
+# still completes. Nothing when the worktree home is missing or empty.
 function __fish_print_worktrees
-    set -l repo (__wt_repo_name 2>/dev/null); or return 1
-    path dirname $__wt_worktree_home/*/$repo 2>/dev/null | path basename
+    set -l venv_home (basename $__wt_venv_home)
+    test -d $__wt_worktree_home; or return 1
+    for dir in $__wt_worktree_home/*
+        test -d $dir; or continue
+        set -l name (basename $dir)
+        if not test "$name" = "$venv_home"
+            echo $name
+        end
+    end
 end
 
 function __fish_print_groups
