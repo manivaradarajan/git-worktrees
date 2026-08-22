@@ -16,14 +16,8 @@
 # removed by worktree-rm, and auto-activated on cd into any of the idea's
 # worktrees.
 #
-# Repo groups (default fan-out sets) live in
-#   $__wt_worktree_home/WORKTREE-GROUPS   format: `name: repo1 repo2`
-#
-# Repo selection (mutually exclusive; default varies — see __wt_resolve_repos):
+# Repo selection (default varies — see __wt_resolve_repos):
 #   --repos=A,B,C   one-off set for this invocation (ephemeral, no prompt)
-#   -g NAME         a named group from WORKTREE-GROUPS
-#   --save NAME     with --repos, persist the set as group NAME (or prompt
-#                   interactively and save)
 #
 # All commands work from ANY directory: repos are located under
 # $__wt_github_home, ideas under $__wt_worktree_home/<idea>. When a required
@@ -32,14 +26,15 @@
 # current repo (when inside one) or fail with a hint to pass --repos/-g.
 #
 # Lifecycle:
-#   author plan -> register (global WORKTREES.md) -> worktree-start ->
-#   develop/commit -> worktree-merge (rebase+ff, no push) ->
-#   worktree-stop (park) | worktree-rm (teardown) -> update WORKTREES.md
+#   author plan -> worktree-start (writes IDEA.md) -> develop/commit ->
+#   worktree-merge (rebase+ff, no push) -> worktree-stop (park) |
+#   worktree-rm (teardown)
 #
 # `main` always means the LOCAL main branch; this tool never fetches or pushes.
-# WORKTREES.md (at $__wt_worktree_home/WORKTREES.md, alongside WORKTREE-GROUPS)
-# is human-maintained metadata (never auto-edited); its Status column uses
-# `active | parked | merged | abandoned`.
+# Each idea's metadata lives in $__wt_worktree_home/<idea>/IDEA.md (created by
+# worktree-start; Status auto-maintained as `active | parked | merged`; the
+# rest is free-form and human-editable; removed with the idea dir by
+# worktree-rm).
 #
 # See README.md in this repo for the full guide.
 
@@ -167,54 +162,13 @@ function __wt_split_repos
     string split , $argv[1] | string trim | string match -rv '^$'
 end
 
-# __wt_validate_group — group names are [a-z0-9][a-z0-9-]* (regex-safe, so the
-# `^name:` grep in read/save can never be confused by metacharacters). `--`
-# guards against a `-foo` name being parsed as an option.
-function __wt_validate_group
-    string match -q -r -- '^[a-z0-9][a-z0-9-]*$' $argv[1]
-end
-
-# __wt_read_group — print the repo list for a named group from WORKTREE-GROUPS.
-# Prints nothing (exits 1) if the file or group name is unknown/invalid.
-function __wt_read_group
-    test -f $__wt_worktree_home/WORKTREE-GROUPS; or return 1
-    __wt_validate_group $argv[1]; or return 1
-    set -l line (grep -E "^$argv[1]:" $__wt_worktree_home/WORKTREE-GROUPS | head -n1)
-    test -n "$line"; or return 1
-    string replace -r "^$argv[1]:[ \t]*" '' $line \
-        | string split ' ' \
-        | string match -rv '^$'
-end
-
-# __wt_save_group — write/refresh a group line (repos alphabetized).
-# Replaces the line for the same name if present, else appends. Group name is
-# validated (regex-safe) before writing.
-function __wt_save_group
-    set -l name $argv[1]
-    set -l repos $argv[2..-1]
-    __wt_validate_group $name; or begin
-        echo "__wt_save_group: invalid group name '$name' (use [a-z0-9-])" >&2
-        return 1
-    end
-    set -l line "$name: "(printf '%s\n' $repos | sort | string join ' ')
-    mkdir -p $__wt_worktree_home
-    if test -f $__wt_worktree_home/WORKTREE-GROUPS
-        grep -v -E "^$name:" $__wt_worktree_home/WORKTREE-GROUPS \
-            > $__wt_worktree_home/WORKTREE-GROUPS.tmp
-        echo $line >> $__wt_worktree_home/WORKTREE-GROUPS.tmp
-        mv $__wt_worktree_home/WORKTREE-GROUPS.tmp $__wt_worktree_home/WORKTREE-GROUPS
-    else
-        echo $line > $__wt_worktree_home/WORKTREE-GROUPS
-    end
-end
-
 # __wt_resolve_repos — turn the parsed flags (or the default) into the repo
 # list, one per line. Works from any directory.
 #   $argv[1] = --repos CSV value (may be empty)
-#   $argv[2] = -g group name (may be empty)
+#   $argv[2] = unused (was the -g group name; groups were removed)
 #   $argv[3] = idea name
 #   $argv[4] = derive flag: 1 => merge/stop/rm (see below), 0 => start/venv
-# Precedence: --repos > -g > derive (merge/stop/rm) > interactive prompt
+# Precedence: --repos > derive (merge/stop/rm) > interactive prompt
 # (start/venv) > current repo > helpful error.
 #
 # NOTE on error output: this function is always called from a command
@@ -226,18 +180,19 @@ end
 function __wt_resolve_repos
     if test -n "$argv[1]"
         __wt_split_repos $argv[1]
-    else if test -n "$argv[2]"
-        __wt_read_group $argv[2]
-        or begin
-            echo "__wt_resolve_repos: unknown group '$argv[2]'"
-            return 1
-        end
     else if test "$argv[4]" = 1
         # merge/stop/rm: the idea's existing worktree dirs define the set.
-        # Inside a repo, keep the historical "current repo" default; from a
-        # neutral cwd fall back to the worktree dirs (they already exist).
+        # The current repo is used ONLY when it actually has a worktree for
+        # this idea; from a non-participating repo (or a neutral cwd) we fall
+        # back to every repo that has one — so e.g. `worktree-rm <idea>` from
+        # the tooling repo tears the whole idea down instead of stalling on
+        # "no worktree" for the current repo.
+        # An idea dir with NO worktree subdirs (fully parked/torn-down, or an
+        # orphaned leftover) yields an EMPTY set — so teardown of the idea dir
+        # itself can still run. The hard error is reserved for when the idea
+        # dir doesn't exist either.
         set -l cur (__wt_repo_name 2>/dev/null)
-        if test -n "$cur"
+        if test -n "$cur"; and test -d (__wt_wt_path $argv[3] $cur)
             echo $cur
         else
             set -l derived
@@ -247,8 +202,10 @@ function __wt_resolve_repos
             end
             if set -q derived[1]
                 printf '%s\n' $derived
+            else if test -d (__wt_idea_path $argv[3])
+                return 0   # empty set: orphaned idea dir, teardown path runs
             else
-                echo "not inside a git repository and no worktree dirs for idea '$argv[3]' (pass --repos=A,B,C or -g NAME)"
+                echo "not inside a git repository and no worktree dirs for idea '$argv[3]' (pass --repos=A,B,C)"
                 return 1
             end
         end
@@ -259,7 +216,7 @@ function __wt_resolve_repos
         if test -n "$cur"
             echo $cur
         else
-            echo "not inside a git repository and no --repos/-g given (pass --repos=A,B,C or -g NAME, or run interactively to be prompted)"
+            echo "not inside a git repository and no --repos given (pass --repos=A,B,C, or run interactively to be prompted)"
             return 1
         end
     end
@@ -331,7 +288,7 @@ function __wt_repo_prompt
     set answer (string trim $answer)
     if test -z "$answer"
         test -n "$def"; or begin
-            echo "no repos given (pass --repos=A,B,C or -g NAME)" >&2
+            echo "no repos given (pass --repos=A,B,C)" >&2
             return 1
         end
         echo $def
@@ -347,302 +304,109 @@ function __wt_prompt_description
     test -n "$description"; and echo $description
 end
 
-# --- registry (WORKTREES.md) auto-seeding -----------------------------------
-# WORKTREES.md is human-maintained, but worktree-start --description seeds the
-# idea's row (new ideas get a row; existing rows are only rewritten with
-# --force). The registry lives at $__wt_worktree_home/WORKTREES.md with a
-# Description column:
-#   | Idea | Branch | Repos | Description | Plan file | Status |
-# The layer is split into read-only accessors, a read-only preflight decision,
-# and two mutators (append / rewrite) that share one atomic writer. Mutators
-# are strictly guarded: they never duplicate a row, never clobber a row they
-# cannot verify, and only rename on a fully-successful write.
+# --- per-idea IDEA.md metadata ----------------------------------------------
+# Each idea's metadata lives at $__wt_worktree_home/<idea>/IDEA.md — co-located
+# with the worktrees, so the idea dir's existence IS the registry entry. There
+# is no global registry to keep in sync. Fields:
+#   # Idea: <idea>
+#   Status: active | parked | merged        (auto-maintained by the tooling)
+#   Repos: <space-joined repos>
+#   Description: <free text>                (human-editable)
+#   Plan: <free text>                       (human-editable)
+# Status is rewritten by start/stop/merge; the rest are free-form and may be
+# hand-edited. worktree-rm removes the file with the idea dir (the history of
+# finished ideas lives in git branches, not here).
 
-# __wt_registry_path — the global idea registry path.
-function __wt_registry_path
-    echo $__wt_worktree_home/WORKTREES.md
+# __wt_idea_md_path — absolute path of an idea's IDEA.md.
+function __wt_idea_md_path
+    echo $__wt_worktree_home/$argv[1]/IDEA.md
 end
 
-# __wt_registry_header_cells — the column header cells of WORKTREES.md
-# (the first line starting with `| Idea`). Nothing when absent.
-function __wt_registry_header_cells
-    grep -m1 -E '^\| *Idea' (__wt_registry_path) 2>/dev/null \
-        | string trim -c '|' | string split '|' | string trim
-end
-
-# __wt_registry_has_description — 0 when the header has a Description column.
-function __wt_registry_has_description
-    set -l cells (__wt_registry_header_cells)
-    test -n "$cells[1]"; and contains -- Description $cells
-end
-
-# __wt_registry_cells — a registry line split into trimmed data cells. A line
-# with no pipe delimiters yields one untrimmed cell (never splits mid-line);
-# callers must treat a cell count below the row width as malformed.
-function __wt_registry_cells
-    string trim -c '|' $argv[1] | string split '|' | string trim
-end
-
-# __wt_registry_is_idea_row — 0 when a row line belongs to the given idea,
-# i.e. its Branch cell (column 2, backtick-delimited like `git plan` matches)
-# is exactly `` `$idea` ``. Strict: a `` `$idea` `` occurring in ANY OTHER
-# cell (description, plan file, repos) never makes a line match.
+# __wt_idea_read_field — the value of a `Field:` line in an idea's IDEA.md, or
+# nothing when the file or field is absent.
 #
-# Usage:   __wt_registry_is_idea_row <idea> <line>
-function __wt_registry_is_idea_row
-    set -l cells (__wt_registry_cells $argv[2])
-    test (count $cells) -ge 2; and test "$cells[2]" = "`$argv[1]`"
+# Usage:   __wt_idea_read_field <idea> <Field>
+# Exit codes: 0 ok; 1 field/file missing.
+function __wt_idea_read_field
+    set -l file (__wt_idea_md_path $argv[1])
+    test -f $file; or return 1
+    grep -m1 -E "^$argv[2]:" $file 2>/dev/null | string replace -r "^$argv[2]:[ \t]*" ''
 end
 
-# __wt_registry_row — the first row line for an idea, or nothing. Strictly
-# verified against the Branch cell so a same-name occurrence elsewhere cannot
-# produce a false row.
-function __wt_registry_row
-    set -l idea $argv[1]
-    grep -F "| `$idea` |" (__wt_registry_path) 2>/dev/null | while read -l line
-        if __wt_registry_is_idea_row $idea $line
-            echo $line
-            return 0
-        end
-    end
-end
-
-# __wt_registry_row_count — how many rows exist for an idea (0, 1, or 2+).
-# Callers use this to detect duplicate-row corruption instead of trusting the
-# first match.
-function __wt_registry_row_count
-    set -l idea $argv[1]
-    grep -F "| `$idea` |" (__wt_registry_path) 2>/dev/null | while read -l line
-        __wt_registry_is_idea_row $idea $line; and echo 1
-    end
-end
-
-# __wt_registry_ensure_table — create the registry file with its title, blank
-# line, header and separator when the file is absent or empty. A non-empty
-# existing file is never touched (preflight owns schema checks on it).
+# __wt_idea_write_meta — (re)write an idea's IDEA.md atomically. Always ensures
+# the file exists with `Status: active`, `Repos`, and the idea header. A
+# `--description` is written only when given; a conflicting existing description
+# aborts without --force. Without --description an existing Description is left
+# untouched, and any existing Plan line is preserved either way.
 #
-# Usage:   __wt_registry_ensure_table
-# Exit codes: 0 ok (table present); 1 could not write.
-function __wt_registry_ensure_table
-    set -l file (__wt_registry_path)
-    if test -f $file; and test -s $file
-        return 0
-    end
+# Usage:   __wt_idea_write_meta [--force] [--description=TEXT] <idea> <repos...>
+# Exit codes: 0 ok (written or no-op); 1 conflicting description / write failure.
+function __wt_idea_write_meta
+    argparse 'f/force' 'description=' -- $argv; or return 1
+    set -l idea $argv[1]
+    set -l repos $argv[2..-1]
+    set -l file (__wt_idea_md_path $idea)
     mkdir -p (dirname $file); or return 1
-    echo "# Worktrees" > $file; or return 1
-    echo >> $file
-    echo "| Idea | Branch | Repos | Description | Plan file | Status |" >> $file
-    echo "|---|---|---|---|---|---|" >> $file
+    set -l description ""
+    if set -q _flag_description
+        set description $_flag_description
+    end
+    if test -f $file
+        set -l existing (__wt_idea_read_field $idea Description)
+        if test -n "$description"; and test -n "$existing"; and not test "$existing" = "$description"
+            if not set -q _flag_force
+                echo "IDEA.md for '$idea' has a different description (pass --force to overwrite):" >&2
+                echo "  existing: $existing" >&2
+                echo "  new:      $description" >&2
+                return 1
+            end
+        end
+        test -n "$description"; or set description $existing
+    end
+    set -l plan (__wt_idea_read_field $idea Plan)
+    set -l tmp (mktemp (dirname $file)/IDEA.md.XXXXXX); or return 1
+    echo "# Idea: $idea" > $tmp
+    echo "Status: active" >> $tmp
+    echo "Repos: "(string join ' ' $repos) >> $tmp
+    echo "Description: $description" >> $tmp
+    echo "Plan: $plan" >> $tmp
+    mv $tmp $file; or begin
+        rm -f $tmp
+        return 1
+    end
 end
 
-# __wt_registry_migrate_description — add the Description column to an
-# old-schema WORKTREES.md (header lacks it), so --description seeding works on
-# a pre-existing registry without hand-editing. Atomic tmp+mv; preserves mode.
-# Only table lines (starting with `|`) are touched: the FIRST table line is the
-# header (insert `Description` after Repos), a separator line (all `-` cells)
-# gets `---` inserted, and every other row gets an empty cell. Non-table lines
-# (title, comments, blanks) pass through untouched. Rows with too few cells to
-# insert into are left as-is. Idempotent: a registry that already has the
-# column is a no-op.
+# __wt_idea_set_status — rewrite only the `Status:` line of an idea's IDEA.md,
+# preserving every other line. Creates the file with the given status if absent
+# (defensive: status transitions always follow a start, which writes the file).
 #
-# Usage:   __wt_registry_migrate_description
-# Exit codes: 0 migrated (or already current); 1 write failure.
-function __wt_registry_migrate_description
-    set -l file (__wt_registry_path)
-    test -f $file; and test -s $file; or return 0
-    __wt_registry_has_description; and return 0
-    set -l tmp (mktemp (dirname $file)/WORKTREES.md.XXXXXX); or return 1
-    set -l mode (stat -f %Lp $file 2>/dev/null)
-    set -l n 0
+# Usage:   __wt_idea_set_status <idea> <status>
+# Exit codes: 0 ok; 1 write failure.
+function __wt_idea_set_status
+    set -l idea $argv[1]
+    set -l new_status $argv[2]
+    set -l file (__wt_idea_md_path $idea)
+    if not test -f $file
+        mkdir -p (dirname $file); or return 1
+        echo "# Idea: $idea" > $file; or return 1
+    end
+    set -l tmp (mktemp (dirname $file)/IDEA.md.XXXXXX); or return 1
+    set -l matched 0
     while read -l line
-        if string match -q -- '|*' $line
-            set n (math $n + 1)
-            set -l cells (__wt_registry_cells $line)
-            if test (count $cells) -lt 3
-                echo $line
-                continue
-            end
-            set -l insert ""
-            if test $n -eq 1
-                set insert Description   # header
-            else
-                set -l all_dashes 1
-                for c in $cells
-                    string match -q -r -- '^-+$' $c; or set all_dashes 0
-                end
-                if test $all_dashes -eq 1
-                    set insert ---   # separator
-                end
-            end
-            set -l out $cells[1..3]
-            set -a out $insert
-            set -a out $cells[4..-1]
-            echo "| "(string join -- ' | ' $out)" |"
+        if string match -q -- 'Status:*' $line
+            echo "Status: $new_status"
+            set matched 1
         else
             echo $line
         end
     end < $file > $tmp
-    if test -n "$mode"
-        chmod $mode $tmp
+    if test $matched -eq 0
+        echo "Status: $new_status" >> $tmp
     end
-    mv $tmp $file
-    echo "WORKTREES.md migrated to add the Description column" >&2
-end
-
-# __wt_registry_append_row — append a row for a NEW idea. Refuses if any row
-# already exists for the idea (belt-and-braces: callers gate on preflight, but
-# a duplicate here would corrupt the registry). <description> may be empty.
-#
-# Usage:   __wt_registry_append_row <idea> <description> <repos...>
-# Exit codes: 0 ok; 1 duplicate row, missing description, or write failure.
-function __wt_registry_append_row
-    set -l idea $argv[1]
-    set -l description $argv[2]
-    set -l repos $argv[3..-1]
-    test -n "$idea"; or begin
-        echo "__wt_registry_append_row: idea is required" >&2
-        return 1
-    end
-    __wt_validate_description $description; or return 1
-    set -l file (__wt_registry_path)
-    test -f $file; and test -s $file; and test (count (__wt_registry_row_count $idea)) -gt 0; and begin
-        echo "__wt_registry_append_row: a row for '$idea' already exists" >&2
-        return 1
-    end
-    __wt_registry_ensure_table; or return 1
-    echo "| `$idea` | `$idea` | "(string join ' ' $repos)" | $description |  | active |" >> $file
-end
-
-# __wt_registry_atomic_rewrite — stream the registry through a filter into a
-# temp file in the SAME directory (so rename is atomic), rename only on full
-# success, and clean the temp file on any failure. The filter must update
-# exactly one line and report it via the counter `__wt_registry_matched`.
-#
-# Usage:   __wt_registry_atomic_rewrite <filter-function> <args...>
-# Exit codes: 0 renamed; 1 no line matched, write failure, or filter error.
-function __wt_registry_atomic_rewrite
-    set -l filter $argv[1]
-    set -l file (__wt_registry_path)
-    set -l tmp (mktemp (dirname $file)/WORKTREES.md.XXXXXX); or return 1
-    set -l mode (stat -f %Lp $file 2>/dev/null)
-    set -g __wt_registry_matched 0
-    set -l ok 1
-    while read -l line
-        $filter $argv[2..-1] $line; or set ok 0
-    end < $file > $tmp
-    if test $ok -eq 0; or test "$__wt_registry_matched" -ne 1
+    mv $tmp $file; or begin
         rm -f $tmp
-        if test "$__wt_registry_matched" -eq 0
-            echo "$filter: no matching row to rewrite" >&2
-        else
-            echo "$filter: matched $__wt_registry_matched rows (expected 1) — registry may be corrupt; not rewriting" >&2
-        end
-        set -e __wt_registry_matched
         return 1
     end
-    set -e __wt_registry_matched
-    if test -n "$mode"
-        chmod $mode $tmp
-    end
-    mv $tmp $file
-end
-
-# __wt_registry_rewrite_line — the filter used by __wt_registry_atomic_rewrite
-# to replace the Description cell (column 4) of the idea's row. Increments
-# $__wt_registry_matched for every line whose Branch cell equals `` `$idea` ``.
-#
-# Usage:   __wt_registry_rewrite_line <idea> <description> <line>
-function __wt_registry_rewrite_line
-    set -l idea $argv[1]
-    set -l description $argv[2]
-    set -l line $argv[3]
-    set -l cells (__wt_registry_cells $line)
-    if test (count $cells) -ge 4; and test "$cells[2]" = "`$idea`"
-        set __wt_registry_matched (math $__wt_registry_matched + 1)
-        set cells[4] $description
-        echo "| "(string join ' | ' $cells)" |"
-    else
-        echo $line
-    end
-end
-
-# __wt_registry_rewrite_row — atomically replace the Description cell of the
-# idea's existing row. Fails (no write) when zero rows or more than one row
-# match. Requires a Description column present (preflight enforces it).
-#
-# Usage:   __wt_registry_rewrite_row <idea> <description>
-# Exit codes: 0 ok; 1 nothing matched / duplicate rows / write failure.
-function __wt_registry_rewrite_row
-    __wt_registry_atomic_rewrite __wt_registry_rewrite_line $argv[1] $argv[2]
-end
-
-# __wt_registry_preflight — phase-0 check (before anything is created): can
-# this start invocation write the registry? Auto-migrates an old-schema header
-# (missing the Description column) in place, and errors on a conflicting
-# existing description without --force. No other mutation.
-#
-# Usage:   __wt_registry_preflight [--force] <idea> <description>
-# Exit codes: 0 writable or no-op; 1 schema migration failed / description conflict.
-function __wt_registry_preflight
-    argparse 'f/force' -- $argv; or return 1
-    set -l idea $argv[1]
-    set -l description $argv[2]
-    set -l file (__wt_registry_path)
-    test -f $file; and test -s $file; or return 0   # nothing yet -> append is fine
-    if not __wt_registry_has_description
-        # old-schema registry (pre-Description column): migrate it in place so
-        # --description works on an existing registry without hand-editing.
-        __wt_registry_migrate_description; or return 1
-    end
-    set -l row (__wt_registry_row $idea)
-    test -n "$row"; or return 0   # no row -> append is fine
-    set -l cells (__wt_registry_cells $row)
-    if test (count $cells) -ge 4; and test "$cells[4]" = "$description"
-        return 0   # identical -> no-op
-    end
-    if not set -q _flag_force
-        echo "WORKTREES.md already has a row for '$idea' with a different description (pass --force to overwrite):" >&2
-        echo "  existing: $cells[4]" >&2
-        echo "  new:      $description" >&2
-        return 1
-    end
-    return 0
-end
-
-# __wt_registry_write — phase-1 (after worktrees are created): apply the row
-# change, appending for a new idea or rewriting an existing one. No-op when the
-# description is already in place. Only called when preflight passed.
-#
-# Usage:   __wt_registry_write [--force] <idea> <description> <repos...>
-# Exit codes: 0 ok; 1 write failure / duplicate rows.
-function __wt_registry_write
-    argparse 'f/force' -- $argv; or return 1
-    set -l idea $argv[1]
-    set -l description $argv[2]
-    set -l repos $argv[3..-1]
-    set -l n (count (__wt_registry_row_count $idea))
-    switch $n
-        case 0
-            __wt_registry_append_row $idea $description $repos
-        case 1
-            set -l row (__wt_registry_row $idea)
-            set -l cells (__wt_registry_cells $row)
-            if test (count $cells) -ge 4; and test "$cells[4]" = "$description"
-                return 0   # identical -> no-op
-            end
-            __wt_registry_rewrite_row $idea $description
-        case '*'
-            echo "WORKTREES.md has (count (__wt_registry_row_count $idea)) rows for '$idea' — fix the registry before continuing" >&2
-            return 1
-    end
-end
-
-# __wt_validate_description — a description must not contain `|` (it would
-# corrupt the registry row's column structure). Newlines are impossible in a
-# single argv element, so this is the complete injection guard.
-function __wt_validate_description
-    string match -q -- '*|*' $argv[1]; and return 1
-    return 0
 end
 
 # --- shared per-idea node deps ----------------------------------------------
@@ -763,6 +527,43 @@ end
 #   $__wt_worktree_home/<idea>
 function __wt_idea_path
     echo $__wt_worktree_home/$argv[1]
+end
+
+# __wt_idea_live_worktrees — basenames of subdirs under an idea's dir that are
+# still valid git worktrees. The teardown safety gate: only when this is empty
+# may worktree-rm delete the shared venv and the idea dir itself (a partial
+# teardown where another repo's worktree still lives here must NOT touch them).
+#
+# Usage:   __wt_idea_live_worktrees <idea>
+# Exit codes: 0 ok; 1 idea dir missing.
+function __wt_idea_live_worktrees
+    set -l idea_dir (__wt_idea_path $argv[1])
+    test -d $idea_dir; or return 1
+    for repo_dir in $idea_dir/*
+        test -d $repo_dir; or continue
+        if git -C $repo_dir rev-parse --git-dir >/dev/null 2>&1
+            basename $repo_dir
+        end
+    end
+end
+
+# __wt_idea_stray_items — top-level entries in an idea's dir that are NOT live
+# worktrees: files (dotfiles like .DS_Store included) and leftover subdirs.
+# `rm -rf` removes symlinks, not their targets, so deleting these is safe.
+#
+# Usage:   __wt_idea_stray_items <idea>
+# Exit codes: 0 ok; 1 idea dir missing.
+function __wt_idea_stray_items
+    set -l idea_dir (__wt_idea_path $argv[1])
+    test -d $idea_dir; or return 1
+    set -l live (__wt_idea_live_worktrees $argv[1])
+    for entry in $idea_dir/*
+        test -e $entry; or continue
+        set -l name (basename $entry)
+        contains -- $name $live; and continue
+        test "$name" = "IDEA.md"; and continue   # managed metadata, goes with the dir
+        echo $name
+    end
 end
 
 # __wt_python_manifest — the kind of Python manifest a repo's main clone has, or
@@ -1068,7 +869,7 @@ function __wt_usage_start
     echo "Works from any directory: repos via \$__wt_github_home, ideas via"
     echo "\$__wt_worktree_home/<idea>."
     echo
-    echo "Usage:  worktree-start [--repos=A,B,C | -g NAME] [--save NAME]"
+    echo "Usage:  worktree-start [--repos=A,B,C]"
     echo "                       [--description=TEXT] [--force] [--help] [<idea>]"
     echo
     echo "Arguments:"
@@ -1077,18 +878,15 @@ function __wt_usage_start
     echo
     echo "Options:"
     echo "  --repos=A,B,C   Explicit repo set (ephemeral, no prompt)."
-    echo "  -g, --group N   Named group from \$__wt_worktree_home/WORKTREE-GROUPS."
-    echo "  --save NAME     Persist the repo set as group NAME (with --repos;"
-    echo "                  or prompts for the set and saves it)."
-    echo "  --description=T Seed the idea's WORKTREES.md row with description T"
-    echo "                  (new row appended; existing row updated only with"
-    echo "                  --force; identical text is a no-op)."
-    echo "  --force         Overwrite an existing registry description."
+    echo "  --description=T Set the idea's IDEA.md Description to T (written"
+    echo "                  on start; an existing different description is"
+    echo "                  overwritten only with --force; identical is a no-op)."
+    echo "  --force         Overwrite an existing IDEA.md description."
     echo "  -h, --help      Show this help."
     echo
     echo "Missing args are prompted for when stdin is interactive (idea, repo"
     echo "set — default: current repo, description). Non-interactive: current"
-    echo "repo when inside one, else an error hinting --repos/-g."
+    echo "repo when inside one, else an error hinting --repos."
     echo
     echo "Exit codes: 0 ok; 1 usage error, invalid idea, prompt declined,"
     echo "preflight failure (nothing created), or venv-provisioning failure."
@@ -1098,9 +896,9 @@ function __wt_usage_merge
     echo "worktree-merge — coordinated rebase-onto-main then --ff-only merge."
     echo "Works from any directory; repos via \$__wt_github_home."
     echo
-    echo "Usage:  worktree-merge [--repos=A,B,C | -g NAME] [--help] [<idea>]"
+    echo "Usage:  worktree-merge [--repos=A,B,C] [--help] [<idea>]"
     echo
-    echo "  <idea>      Required (or prompted). --repos/-g override the repo"
+    echo "  <idea>      Required (or prompted). --repos overrides the repo"
     echo "              set; otherwise inside a repo the current repo is used,"
     echo "              from a neutral dir the idea's existing worktrees are."
     echo "  -h, --help  Show this help."
@@ -1112,9 +910,9 @@ function __wt_usage_stop
     echo "worktree-stop — park a worktree: remove the dir, keep the branch."
     echo "Works from any directory; repos via \$__wt_github_home."
     echo
-    echo "Usage:  worktree-stop [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]"
+    echo "Usage:  worktree-stop [--repos=A,B,C] [--force] [--help] [<idea>]"
     echo
-    echo "  <idea>      Required (or prompted). --repos/-g override the repo"
+    echo "  <idea>      Required (or prompted). --repos overrides the repo"
     echo "              set; otherwise inside a repo the current repo is used,"
     echo "              from a neutral dir the idea's existing worktrees are."
     echo "  --force     Discard uncommitted changes and remove anyway."
@@ -1124,16 +922,21 @@ function __wt_usage_stop
 end
 
 function __wt_usage_rm
-    echo "worktree-rm — tear down a worktree and delete its branch (and the"
-    echo "idea's shared venv). Works from any directory."
+    echo "worktree-rm — tear down a worktree and delete its branch (and, on"
+    echo "full teardown, the idea's shared venv and idea dir). Works from any"
+    echo "directory."
     echo
-    echo "Usage:  worktree-rm [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]"
+    echo "Usage:  worktree-rm [--repos=A,B,C] [--force] [--help] [<idea>]"
     echo
-    echo "  <idea>      Required (or prompted). --repos/-g override the repo"
+    echo "  <idea>      Required (or prompted). --repos overrides the repo"
     echo "              set; otherwise inside a repo the current repo is used,"
     echo "              from a neutral dir the idea's existing worktrees are."
     echo "  --force     Discard uncommitted changes; skip some confirms."
     echo "  -h, --help  Show this help."
+    echo
+    echo "Full teardown (no worktree remains) removes the shared venv and the"
+    echo "idea dir; leftover cruft is confirmed first (default keep). A partial"
+    echo "teardown leaves both untouched."
     echo
     echo "Exit codes: 0 ok; 1 usage error, dirty worktree (no --force), etc."
 end
@@ -1142,16 +945,16 @@ function __wt_usage_venv
     echo "worktree-venv — ensure/refresh the shared per-idea Python venv."
     echo "Works from any directory; repos via \$__wt_github_home."
     echo
-    echo "Usage:  worktree-venv [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]"
+    echo "Usage:  worktree-venv [--repos=A,B,C] [--force] [--help] [<idea>]"
     echo
-    echo "  <idea>      Required (or prompted). --repos/-g override the repo"
+    echo "  <idea>      Required (or prompted). --repos overrides the repo"
     echo "              set; otherwise inside a repo the current repo is used,"
     echo "              from a neutral dir the idea's existing worktrees are."
     echo "  --force     Reinstall deps (pip) / recreate the venv (uv)."
     echo "  -h, --help  Show this help."
     echo
-    echo "Prints the venv path. Exit codes: 0 ok; 1 usage/invalid/unknown"
-    echo "group, or no Python manifests in the set."
+    echo "Prints the venv path. Exit codes: 0 ok; 1 usage/invalid, or no"
+    echo "Python manifests in the set."
 end
 
 # venv-activate — manually activate a Python venv through the same manager used
@@ -1175,61 +978,49 @@ end
 # Idempotent: if the worktree dir already exists (and is a valid worktree for
 # this idea/repo) it just cds in; if the branch exists but the worktree is gone
 # it re-attaches; otherwise it creates a fresh branch off `main`. With --repos
-# or -g it ensures every repo in the set, cds into the current repo's worktree
-# (or the first in the set), and prints all the paired dirs. With --repos +
-# --save NAME it persists the set as a group.
+# it ensures every repo in the set, cds into the current repo's worktree (or
+# the first in the set), and prints all the paired dirs.
 #
-# --description=T seeds the idea's WORKTREES.md row (auto-seeds a new row;
-# an existing row is only rewritten with --force; identical text is a no-op).
-# The registry decision is PREFLIGHTED in phase 0 so a conflict or old-schema
-# registry aborts before anything is created.
+# --description=T sets the idea's IDEA.md Description (written on start; an
+# existing different description is overwritten only with --force; identical
+# text is a no-op). A conflicting description is PREFLIGHTED in phase 0 so it
+# aborts before anything is created.
 #
 # Two-phase (mirrors worktree-merge): phase 0 validates the whole repo set
 # (main clone exists, is a git repo, has local `main`, destination is either
 # absent or a valid worktree for this idea/repo, an interpreter present — uv or
 # python3 — if any repo has a Python manifest) BEFORE creating anything, so a
 # missing repo cannot leave a partially-created idea. Phase 1 creates/attaches
-# worktrees and provisions the shared per-idea venv ($__wt_venv_home/<idea>) as
-# the union of every participating repo's Python manifests. cd'ing into a
-# worktree then auto-activates that venv (see __wt_auto_activate_venv).
+# worktrees, provisions the shared per-idea venv ($__wt_venv_home/<idea>) as
+# the union of every participating repo's Python manifests, and writes the
+# idea's IDEA.md (Status active). cd'ing into a worktree then auto-activates
+# that venv (see __wt_auto_activate_venv).
 #
 # <idea> must satisfy <idea> == branch == one directory component (validated by
 # __wt_validate_idea). `main` here means the LOCAL main branch — keeping it
 # current (fetching origin) is the user's responsibility; this tool never
 # fetches or pushes.
 #
-# Usage:   worktree-start [--repos=A,B,C | -g NAME] [--save NAME]
+# Usage:   worktree-start [--repos=A,B,C]
 #                         [--description=TEXT] [--force] [--help] [<idea>]
 # Flags:   --repos=A,B,C  explicit repo set for this invocation (ephemeral)
-#          -g NAME        named group from WORKTREE-GROUPS
-#          --save NAME    with --repos, persist the set as group NAME
-#                         (interactive: prompts for the set and saves it)
-#          --description= seed the idea's WORKTREES.md row with this text
-#          --force        overwrite an existing registry description
+#          --description= set the idea's IDEA.md Description to this text
+#          --force        overwrite an existing IDEA.md description
 #          -h/--help      show usage (works with zero input, any directory)
 # Example: worktree-start --repos=grantha-explorer,grantha-data,ramayana \
-#                          --save ramayana incorporate-ramayana-govindaraja
+#                          incorporate-ramayana-govindaraja
 #
 # Side effects: may install JS deps in every repo of the set that has a
 # package.json (best-effort; manager chosen by lockfile, skipped when
-# node_modules already present); may create/populate the shared idea venv; may
-# append to WORKTREE-GROUPS (with --save); may append/update WORKTREES.md
-# (with --description).
+# node_modules already present); may create/populate the shared idea venv;
+# writes the idea's IDEA.md.
 # Exit codes: 0 ok; 1 usage error, invalid idea, any phase-0 validation
 # failure (nothing created in that case), or a venv-provisioning failure.
 function worktree-start
-    argparse 'repos=' 'g/group=' 'save=' 'description=' 'f/force' 'h/help' -- $argv; or return 1
+    argparse 'repos=' 'description=' 'f/force' 'h/help' -- $argv; or return 1
     if set -q _flag_help
         __wt_usage_start
         return 0
-    end
-    if set -q _flag_repos; and set -q _flag_group
-        echo "worktree-start: --repos and -g are mutually exclusive" >&2
-        return 1
-    end
-    if set -q _flag_save; and not set -q _flag_repos; and not __wt_is_interactive
-        echo "worktree-start: --save requires --repos (or run interactively to be prompted)" >&2
-        return 1
     end
     set -l idea ""
     if set -q argv[1]
@@ -1237,7 +1028,7 @@ function worktree-start
     else if __wt_is_interactive
         set idea (__wt_prompt_idea); or return 1
     else
-        echo "usage: worktree-start [--repos=A,B,C | -g NAME] [--save NAME] [--description=TEXT] [--force] <idea>" >&2
+        echo "usage: worktree-start [--repos=A,B,C] [--description=TEXT] [--force] <idea>" >&2
         return 1
     end
     __wt_validate_idea $idea
@@ -1247,7 +1038,7 @@ function worktree-start
     end
     set -l description ""
     set -l self (__wt_repo_name 2>/dev/null)
-    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group" $idea 0)
+    set -l repos (__wt_resolve_repos "$_flag_repos" "" $idea 0)
     or begin
         printf '%s\n' $repos >&2   # resolve prints its error on stdout (captured)
         return 1
@@ -1257,13 +1048,6 @@ function worktree-start
     end
     if test -z "$description"; and __wt_is_interactive
         set description (__wt_prompt_description)
-    end
-    if test -n "$description"
-        __wt_validate_description $description
-        or begin
-            echo "worktree-start: --description must not contain '|'" >&2
-            return 1
-        end
     end
     # phase 0 — validate the whole set before mutating anything
     for repo in $repos
@@ -1316,13 +1100,15 @@ function worktree-start
             return 1
         end
     end
-    # phase 0c — registry preflight: a description conflict or old-schema
-    # registry aborts before anything is created.
-    if test -n "$description"
-        if set -q _flag_force
-            __wt_registry_preflight --force $idea $description; or return 1
-        else
-            __wt_registry_preflight $idea $description; or return 1
+    # phase 0c — IDEA.md preflight: a description conflict aborts before
+    # anything is created (the same check write_meta re-runs in phase 1).
+    if test -n "$description"; and not set -q _flag_force
+        set -l existing (__wt_idea_read_field $idea Description)
+        if test -n "$existing"; and not test "$existing" = "$description"
+            echo "IDEA.md for '$idea' has a different description (pass --force to overwrite):" >&2
+            echo "  existing: $existing" >&2
+            echo "  new:      $description" >&2
+            return 1
         end
     end
     # phase 1 — create/attach (all validated above)
@@ -1353,17 +1139,16 @@ function worktree-start
             echo "  "(__wt_wt_path $idea $repo)
         end
     end
-    if set -q _flag_save; and set -q _flag_repos
-        __wt_save_group $_flag_save $repos
-    else if set -q _flag_save
-        __wt_save_group $_flag_save $repos   # interactive prompt already resolved
-    end
+    # IDEA.md metadata — always ensured (Status active + Repos), with the
+    # description when given (--force to overwrite a conflicting one).
     if test -n "$description"
         if set -q _flag_force
-            __wt_registry_write --force $idea $description $repos; or return 1
+            __wt_idea_write_meta --force --description=$description $idea $repos; or return 1
         else
-            __wt_registry_write $idea $description $repos; or return 1
+            __wt_idea_write_meta --description=$description $idea $repos; or return 1
         end
+    else
+        __wt_idea_write_meta $idea $repos; or return 1
     end
     set -l target $self
     if not contains -- $self $repos
@@ -1424,22 +1209,19 @@ end
 #   phase 2  --ff-only merge each into its own main
 # Does NOT push. Leaves each branch checked out in its worktree.
 #
-# Usage:   worktree-merge [--repos=A,B,C | -g NAME] [--help] [<idea>]
-# Example: worktree-merge -g ramayana incorporate-ramayana-govindaraja
+# Usage:   worktree-merge [--repos=A,B,C] [--help] [<idea>]
+# Example: worktree-merge --repos=grantha-data,grantha-explorer \
+#                          incorporate-ramayana-govindaraja
 # Exit codes: 0 ok; 1 usage error or any phase failure. On a phase-1 failure no
 # main branch has been merged, but some idea branches may already have been
 # rebased (no rollback — see Known limitations). A phase-2 failure is unexpected
 # but still possible (hooks, locks, concurrent state changes); it is not
 # "impossible", just unusual.
 function worktree-merge
-    argparse 'repos=' 'g/group=' 'h/help' -- $argv; or return 1
+    argparse 'repos=' 'h/help' -- $argv; or return 1
     if set -q _flag_help
         __wt_usage_merge
         return 0
-    end
-    if set -q _flag_repos; and set -q _flag_group
-        echo "worktree-merge: --repos and -g are mutually exclusive" >&2
-        return 1
     end
     set -l idea ""
     if set -q argv[1]
@@ -1447,7 +1229,7 @@ function worktree-merge
     else if __wt_is_interactive
         set idea (__wt_prompt_idea); or return 1
     else
-        echo "usage: worktree-merge [--repos=A,B,C | -g NAME] <idea>" >&2
+        echo "usage: worktree-merge [--repos=A,B,C] <idea>" >&2
         return 1
     end
     __wt_validate_idea $idea
@@ -1455,7 +1237,7 @@ function worktree-merge
         echo "worktree-merge: invalid idea name '$idea'" >&2
         return 1
     end
-    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group" $idea 1)
+    set -l repos (__wt_resolve_repos "$_flag_repos" "" $idea 1)
     or begin
         printf '%s\n' $repos >&2   # resolve prints its error on stdout (captured)
         return 1
@@ -1504,6 +1286,7 @@ function worktree-merge
         end
         echo "merged $idea into $repo main"
     end
+    __wt_idea_set_status $idea merged; or return 1
     echo "remember to push origin/main in each repo"
 end
 # worktree-stop — park a worktree: remove the dir but keep the branch.
@@ -1513,19 +1296,15 @@ end
 # never dangles inside a removed dir. Works from any directory; missing <idea>
 # is prompted for when interactive.
 #
-# Usage:   worktree-stop [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]
+# Usage:   worktree-stop [--repos=A,B,C] [--force] [--help] [<idea>]
 # Flags:   --force  discard uncommitted changes and remove anyway
 #          --help   show usage
 # Exit codes: 0 ok; 1 usage error, dirty worktree (no --force), or invalid idea.
 function worktree-stop
-    argparse 'repos=' 'g/group=' 'f/force' 'h/help' -- $argv; or return 1
+    argparse 'repos=' 'f/force' 'h/help' -- $argv; or return 1
     if set -q _flag_help
         __wt_usage_stop
         return 0
-    end
-    if set -q _flag_repos; and set -q _flag_group
-        echo "worktree-stop: --repos and -g are mutually exclusive" >&2
-        return 1
     end
     set -l idea ""
     if set -q argv[1]
@@ -1533,7 +1312,7 @@ function worktree-stop
     else if __wt_is_interactive
         set idea (__wt_prompt_idea); or return 1
     else
-        echo "usage: worktree-stop [--repos=A,B,C | -g NAME] [--force] <idea>" >&2
+        echo "usage: worktree-stop [--repos=A,B,C] [--force] <idea>" >&2
         return 1
     end
     __wt_validate_idea $idea
@@ -1541,7 +1320,7 @@ function worktree-stop
         echo "worktree-stop: invalid idea name '$idea'" >&2
         return 1
     end
-    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group" $idea 1); or return 1
+    set -l repos (__wt_resolve_repos "$_flag_repos" "" $idea 1); or return 1
     for repo in $repos
         set -l path (__wt_wt_path $idea $repo)
         test -d $path
@@ -1563,31 +1342,38 @@ function worktree-stop
         end
         echo "parked $path (branch kept)"
     end
+    # Status: parked only on FULL park (no live worktree remains); a partial
+    # park leaves the idea active.
+    set -l live (__wt_idea_live_worktrees $idea)
+    if not set -q live[1]
+        __wt_idea_set_status $idea parked; or return 1
+    end
     rmdir (__wt_idea_path $idea) 2>/dev/null   # drop empty idea dir (mid-set safe)
-    echo "update $__wt_worktree_home/WORKTREES.md rows if parked"
+    echo "update $__wt_worktree_home/IDEA.md Status if parked"
 end
 # worktree-rm — tear down a worktree and delete its branch.
 #
 # Removes the worktree first (git refuses branch deletion while a worktree is
-# live), then deletes the branch safe-first: `git branch -d`; if the branch is
-# not merged into main, prompts for a second confirmation before `git branch -D`.
-# Finally removes the shared idea venv (recreatable on next start; prompts
-# before removing). Refuses when dirty unless --force. Works from any
-# directory; missing <idea> is prompted for when interactive.
+# live; a failed removal aborts BEFORE the branch is touched), then deletes the
+# branch safe-first: `git branch -d`; if the branch is not merged into main,
+# prompts for a second confirmation before `git branch -D`. On FULL teardown
+# (no live worktree remains under the idea dir) removes the shared venv
+# (prompts) and the idea dir itself — leftover cruft (empty subdirs, .DS_Store,
+# stray notes) is listed and confirmed before deletion (default keep). A
+# partial teardown (another repo's worktree still lives in the idea dir) leaves
+# the venv and the idea dir untouched. Refuses when dirty unless --force. Works
+# from any directory; missing <idea> is prompted for when interactive.
 #
-# Usage:   worktree-rm [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]
+# Usage:   worktree-rm [--repos=A,B,C] [--force] [--help] [<idea>]
 # Flags:   --force  discard uncommitted changes and remove anyway
 #          --help   show usage
-# Exit codes: 0 ok; 1 usage error, dirty worktree (no --force), or invalid idea.
+# Exit codes: 0 ok; 1 usage error, dirty worktree (no --force), failed worktree
+# removal, or invalid idea.
 function worktree-rm
-    argparse 'repos=' 'g/group=' 'f/force' 'h/help' -- $argv; or return 1
+    argparse 'repos=' 'f/force' 'h/help' -- $argv; or return 1
     if set -q _flag_help
         __wt_usage_rm
         return 0
-    end
-    if set -q _flag_repos; and set -q _flag_group
-        echo "worktree-rm: --repos and -g are mutually exclusive" >&2
-        return 1
     end
     set -l idea ""
     if set -q argv[1]
@@ -1595,7 +1381,7 @@ function worktree-rm
     else if __wt_is_interactive
         set idea (__wt_prompt_idea); or return 1
     else
-        echo "usage: worktree-rm [--repos=A,B,C | -g NAME] [--force] <idea>" >&2
+        echo "usage: worktree-rm [--repos=A,B,C] [--force] <idea>" >&2
         return 1
     end
     __wt_validate_idea $idea
@@ -1603,7 +1389,7 @@ function worktree-rm
         echo "worktree-rm: invalid idea name '$idea'" >&2
         return 1
     end
-    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group" $idea 1)
+    set -l repos (__wt_resolve_repos "$_flag_repos" "" $idea 1)
     or begin
         printf '%s\n' $repos >&2   # resolve prints its error on stdout (captured)
         return 1
@@ -1627,6 +1413,10 @@ function worktree-rm
         else
             git worktree remove $path
         end
+        or begin
+            echo "worktree-rm: failed to remove worktree at $path — inspect state; nothing deleted" >&2
+            return 1
+        end
         # safe-first branch deletion
         if git branch -d $idea >/dev/null 2>&1
             echo "deleted branch $repo/$idea"
@@ -1640,7 +1430,16 @@ function worktree-rm
             end
         end
     end
-    # teardown the shared idea venv (recreatable on next start)
+    # teardown is gated on FULL teardown: only when NO live worktree remains
+    # under the idea dir may we delete the shared venv and the idea dir itself.
+    # A partial teardown (another repo's worktree still lives here) must leave
+    # both alone — that repo's venv is shared and its files are in the dir.
+    set -l live (__wt_idea_live_worktrees $idea)
+    if set -q live[1]
+        echo "kept "(__wt_idea_path $idea)" — live worktrees remain: "(string join ' ' $live) >&2
+        return 0
+    end
+    # shared venv (recreatable on next start)
     set -l venv (__wt_venv_path $idea)
     if test -d $venv
         read -l confirm -P "remove shared venv $venv? [Y/n] "
@@ -1651,31 +1450,41 @@ function worktree-rm
             echo "removed venv $venv"
         end
     end
-    rmdir (__wt_idea_path $idea) 2>/dev/null   # drop empty idea dir (mid-set safe)
-    echo "update $__wt_worktree_home/WORKTREES.md — remove $idea rows"
+    # idea dir + leftover cruft (empty leftover subdirs, .DS_Store, stray notes)
+    set -l idea_dir (__wt_idea_path $idea)
+    if test -d $idea_dir
+        # belt-and-braces scope guard: the validated idea is a single path
+        # component, but never rm -rf outside the worktree home.
+        if not string match -q -- "$__wt_worktree_home/*" $idea_dir
+            echo "worktree-rm: refusing to delete $idea_dir (outside worktree home)" >&2
+            return 1
+        end
+        set -l stray (__wt_idea_stray_items $idea)
+        if set -q stray[1]
+            echo "leftover items in $idea_dir (would be deleted):" >&2
+            for s in $stray
+                echo "  $s" >&2
+            end
+            read -l confirm -P "remove idea dir $idea_dir and "(count $stray)" leftover item(s)? [y/N] "
+            if string match -q -i 'y*' $confirm
+                rm -rf $idea_dir
+                echo "removed idea dir $idea_dir"
+            else
+                echo "kept $idea_dir (leftover items left in place)" >&2
+            end
+        else
+            rm -rf $idea_dir   # only empty leftover subdirs remain — silent
+            echo "removed idea dir $idea_dir"
+        end
+    end
+    echo "removed idea $idea (worktree, branch, venv, IDEA.md)"
 end
-# worktree-list — global recall: print the idea registry ($__wt_worktree_home/
-# WORKTREES.md) plus every worktree across all repos under $__wt_worktree_home.
-# No repo needed; no flags.
+# worktree-list — global recall: print every idea's IDEA.md (metadata) plus
+# the worktrees under $__wt_worktree_home/<idea>/<repo>. No repo needed.
 #
 # Usage:   worktree-list
 # Exit codes: 0 always (best-effort).
 function worktree-list
-    set -l registry $__wt_worktree_home/WORKTREES.md
-    if test -f $registry
-        echo "== registry =="
-        cat $registry
-        echo
-    else
-        echo "(no WORKTREES.md at $registry — create one to track ideas)"
-        echo
-    end
-    # idea-first layout: $__wt_worktree_home/<idea>/<repo>. Iterate ideas, then
-    # each idea's repos, filtering each repo's list to THIS idea's paths (a
-    # repo's `git worktree list` covers all of its registered worktrees across
-    # every idea). Fully parked ideas have no dirs and rely on WORKTREES.md
-    # above. Non-directory entries (WORKTREES.md, WORKTREE-GROUPS) and the venv
-    # home are skipped.
     set -l venv_home (basename $__wt_venv_home)
     if test -d $__wt_worktree_home
         for idea_dir in $__wt_worktree_home/*
@@ -1685,6 +1494,12 @@ function worktree-list
                 continue   # shared venv dir is not an idea
             end
             echo "== $idea =="
+            if test -f $idea_dir/IDEA.md
+                cat $idea_dir/IDEA.md
+            else
+                echo "(no IDEA.md)"
+            end
+            echo
             for repo_dir in $idea_dir/*
                 test -d $repo_dir; or continue
                 set -l repo (basename $repo_dir)
@@ -1703,23 +1518,18 @@ end
 # pip installs on create or --force. Prints the venv path. If the current PWD
 # is inside one of the idea's worktrees, activates the venv for this shell.
 #
-# Usage:   worktree-venv [--repos=A,B,C | -g NAME] [--force] [--help] [<idea>]
+# Usage:   worktree-venv [--repos=A,B,C] [--force] [--help] [<idea>]
 # Flags:   --repos=A,B,C  explicit repo set for this invocation (ephemeral)
-#          -g NAME        named group from WORKTREE-GROUPS
 #          --force        reinstall deps (pip) / recreate the venv (uv, e.g. to
 #                         re-pick the interpreter after removing a pin)
 #          --help         show usage
-# Exit codes: 0 ok; 1 usage error, invalid idea, unknown group, or no Python
+# Exit codes: 0 ok; 1 usage error, invalid idea, or no Python
 # manifests in the set.
 function worktree-venv
-    argparse 'repos=' 'g/group=' 'f/force' 'h/help' -- $argv; or return 1
+    argparse 'repos=' 'f/force' 'h/help' -- $argv; or return 1
     if set -q _flag_help
         __wt_usage_venv
         return 0
-    end
-    if set -q _flag_repos; and set -q _flag_group
-        echo "worktree-venv: --repos and -g are mutually exclusive" >&2
-        return 1
     end
     set -l idea ""
     if set -q argv[1]
@@ -1727,7 +1537,7 @@ function worktree-venv
     else if __wt_is_interactive
         set idea (__wt_prompt_idea); or return 1
     else
-        echo "usage: worktree-venv [--repos=A,B,C | -g NAME] [--force] <idea>" >&2
+        echo "usage: worktree-venv [--repos=A,B,C] [--force] <idea>" >&2
         return 1
     end
     __wt_validate_idea $idea
@@ -1735,7 +1545,7 @@ function worktree-venv
         echo "worktree-venv: invalid idea name '$idea'" >&2
         return 1
     end
-    set -l repos (__wt_resolve_repos "$_flag_repos" "$_flag_group" $idea 0)
+    set -l repos (__wt_resolve_repos "$_flag_repos" "" $idea 0)
     or begin
         printf '%s\n' $repos >&2   # resolve prints its error on stdout (captured)
         return 1
@@ -1774,29 +1584,18 @@ function __fish_print_worktrees
     end
 end
 
-function __fish_print_groups
-    test -f $__wt_worktree_home/WORKTREE-GROUPS; or return
-    string replace -r ':.*' '' < $__wt_worktree_home/WORKTREE-GROUPS
-end
-
 complete -c worktree-start -f -a '(__fish_print_worktrees)'
-complete -c worktree-start -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-start -l repos -r -d 'explicit repo set A,B,C'
-complete -c worktree-start -l save -r -d 'save --repos as a named group'
 complete -c worktree-go -f -a '(__fish_print_worktrees)'
 complete -c worktree-merge -f -a '(__fish_print_worktrees)'
-complete -c worktree-merge -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-merge -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-stop -f -a '(__fish_print_worktrees)'
-complete -c worktree-stop -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-stop -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-stop -s f -l force -d 'discard uncommitted changes'
 complete -c worktree-rm -f -a '(__fish_print_worktrees)'
-complete -c worktree-rm -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-rm -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-rm -s f -l force -d 'discard uncommitted changes'
 complete -c worktree-venv -f -a '(__fish_print_worktrees)'
-complete -c worktree-venv -s g -l group -r -a '(__fish_print_groups)' -d 'repo group from WORKTREE-GROUPS'
 complete -c worktree-venv -l repos -r -d 'explicit repo set A,B,C'
 complete -c worktree-venv -s f -l force -d 'reinstall deps / rebuild venv'
 complete -c worktree-list -f

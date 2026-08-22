@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # configure.sh — interactive setup for the worktrees tooling.
 #
-# Prompts for the two home directories, writes a fish config override that
-# loads before worktrees.fish, and seeds WORKTREE-GROUPS with a commented
-# example. Safe to re-run (idempotent, prompts re-ask on each run).
+# Prompts for the two home directories and writes a fish config override that
+# loads before worktrees.fish. Safe to re-run (idempotent, prompts re-ask on
+# each run).
 #
 # Usage:   ./configure.sh
 set -euo pipefail
@@ -94,24 +94,6 @@ set -g __wt_worktree_home "$__wt_worktree_home"
 EOF
 
 echo "wrote $CONF_FILE"
-
-# -- seed WORKTREE-GROUPS if absent ------------------------------------------------
-
-GROUPS_FILE="$__wt_worktree_home/WORKTREE-GROUPS"
-if [[ ! -f "$GROUPS_FILE" ]]; then
-    mkdir -p "$__wt_worktree_home"
-    cat > "$GROUPS_FILE" <<'EOF'
-# WORKTREE-GROUPS — named repo groups for the worktree tooling.
-# Format: one group per line, `name: repo1 repo2` (repos alphabetized).
-# `-g NAME` uses a group; `--save NAME` (with --repos) creates/refreshes one.
-#
-# Example (uncomment and edit):
-# default: grantha-data grantha-explorer
-EOF
-    echo "seeded $GROUPS_FILE (edit it to add your groups)"
-else
-    echo "$GROUPS_FILE already exists — leaving it untouched"
-fi
 
 echo
 echo "Next step: run ./install.sh (symlinks worktrees.fish + sets the git plan alias + installs the opencode model-routing alarm)."

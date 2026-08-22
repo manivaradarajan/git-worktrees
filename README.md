@@ -35,8 +35,8 @@ This repo hosts two tools:
 ```
 $__wt_github_home/<repo>            main clones   (default: ~/github)
 $__wt_worktree_home/<idea>/<repo>   worktrees     (default: ~/git-worktrees)
+$__wt_worktree_home/<idea>/IDEA.md  idea metadata (auto-written)
 $__wt_venv_home/<idea>              shared venv   (one per idea)
-$__wt_worktree_home/WORKTREE-GROUPS named repo groups
 ```
 
 Both homes are configurable. `configure.sh` writes an override that loads
@@ -97,8 +97,8 @@ restart / multi-repo / missing-repo preflight / invalid-idea / bogus-destination
 coordinated merge / stop keeps branch / stop refuses dirty without `--force` /
 resume / rm / shared python venv (union + auto-activation) / repo-local `.venv`
 auto-activation (incl. the PATH-clobber regression) / JS deps / any-directory
-invocation / `--description` registry seeding / registry-layer unit tests /
-interactive prompting (idea/repos/description, `--save`, lifecycle idea prompts,
+invocation / IDEA.md metadata seeding + Status auto-maintenance /
+interactive prompting (idea/repos/description, lifecycle idea prompts,
 `--help`) / and the environment fast-fail guards. Exits nonzero if any test
 fails.
 
@@ -114,28 +114,24 @@ stdin is interactive**: `<idea>` first, then the repo set (defaulting to the
 current repo when you're inside one), then — for `worktree-start` only — the
 description. Non-interactive (scripted) contexts never prompt: a missing
 `<idea>` is a usage error, and a missing repo set falls back to the current repo
-when inside one, otherwise fails with a hint to pass `--repos`/`-g`. Set
+when inside one, otherwise fails with a hint to pass `--repos`. Set
 `__wt_prompt 0` in `worktrees-config.fish` to disable prompting entirely.
 
-Repo selection is mutually exclusive; `--repos` and `-g` never prompt:
+Repo selection: `--repos` never prompts:
 
 - `--repos=A,B,C` — one-off repo set for this invocation (ephemeral).
-- `-g NAME` — a named group from `WORKTREE-GROUPS`.
-- `--save NAME` — with `--repos`, persist the set as group `NAME`; interactively
-  (without `--repos`) it prompts for the set and then saves it.
-  (`--repos` + `-g` together is an error.)
 - `-h` / `--help` on any command prints its usage and exits 0.
 
 | Command | Action |
 |---|---|
-| `worktree-start [--repos=A,B,C \| -g NAME] [--save NAME] [--description=TEXT] [--force] [--help] [<idea>]` | Create/resume the worktree(s), cd in, install JS deps in **every repo of the set** with a `package.json` (npm ci with a lockfile, else npm install; pnpm/yarn/bun chosen per lockfile, npm fallback if the manager is missing), provision the shared Python venv (see below), print paired dirs. Two-phase: validates the whole repo set before creating anything. `--description=TEXT` seeds the idea's `WORKTREES.md` row (new row appended; an existing row's description is updated only with `--force`; identical text is a no-op). |
-| `worktree-go <idea>` | cd into this repo's worktree, show status + registry row. The shared venv auto-activates. |
-| `worktree-venv [--repos=A,B,C \| -g NAME] [--force] [--help] [<idea>]` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. Honors a `.python-version` pin (recreates on minor mismatch). |
-| `worktree-merge [--repos=A,B,C \| -g NAME] [--help] [<idea>]` | Coordinated rebase-onto-local-`main` then `--ff-only` merge into each main. No push. Not a cross-repo transaction. |
-| `worktree-stop [--repos=A,B,C \| -g NAME] [--force] [--help] [<idea>]` | Park: remove the worktree dir, keep the branch. Refuses if dirty unless `--force`. |
-| `worktree-rm [--repos=A,B,C \| -g NAME] [--force] [--help] [<idea>]` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`), then remove the shared venv. |
-| `worktree-list` | Global recall: the idea registry plus every worktree across all repos. |
-| `git plan` | Show this idea's registry row from the global `$__wt_worktree_home/WORKTREES.md`. |
+| `worktree-start [--repos=A,B,C] [--description=TEXT] [--force] [--help] [<idea>]` | Create/resume the worktree(s), cd in, install JS deps in **every repo of the set** with a `package.json` (npm ci with a lockfile, else npm install; pnpm/yarn/bun chosen per lockfile, npm fallback if the manager is missing), provision the shared Python venv (see below), write the idea's `IDEA.md` (Status active), print paired dirs. Two-phase: validates the whole repo set before creating anything. `--description=TEXT` sets the idea's `IDEA.md` Description (an existing different description is overwritten only with `--force`; identical text is a no-op). |
+| `worktree-go <idea>` | cd into this repo's worktree, show status + IDEA.md. The shared venv auto-activates. |
+| `worktree-venv [--repos=A,B,C] [--force] [--help] [<idea>]` | Ensure/refresh the shared venv for a repo set; print its path; activate if already in a participating worktree. Honors a `.python-version` pin (recreates on minor mismatch). |
+| `worktree-merge [--repos=A,B,C] [--help] [<idea>]` | Coordinated rebase-onto-local-`main` then `--ff-only` merge into each main. Sets Status: merged. No push. Not a cross-repo transaction. |
+| `worktree-stop [--repos=A,B,C] [--force] [--help] [<idea>]` | Park: remove the worktree dir, keep the branch. Refuses if dirty unless `--force`. Sets Status: parked on full park. |
+| `worktree-rm [--repos=A,B,C] [--force] [--help] [<idea>]` | Tear down: remove the worktree, then delete the branch (safe-first; confirms before `-D`). On full teardown, removes the shared venv and the idea dir (leftover cruft listed and confirmed; default keep; IDEA.md goes with it). Partial teardown leaves both untouched. |
+| `worktree-list` | Global recall: every idea's `IDEA.md` plus the worktrees across all repos. |
+| `git plan` | Show the current worktree's `IDEA.md` (works from any worktree subdirectory). |
 | `venv-activate <venv>` | Manually activate a Python venv through the same manager the auto-activation uses, so PATH is preserved (see *Repo-local .venv*). |
 
 For `merge`/`stop`/`rm`/`venv`, when neither `--repos` nor `-g` is given, the
@@ -150,19 +146,17 @@ no `/`, no leading `-`, must be a valid Git ref). `main` always means the
 ## Lifecycle
 
 ```text
-author plan -> register (global WORKTREES.md) -> worktree-start ->
-develop/commit -> worktree-merge -> worktree-stop (park) | worktree-rm (teardown)
--> update WORKTREES.md
+author plan -> worktree-start (writes IDEA.md) -> develop/commit ->
+worktree-merge -> worktree-stop (park) | worktree-rm (teardown)
 ```
 
 - `worktree-start` is idempotent: existing worktree -> just cd; parked branch ->
-  re-attach; missing -> create off `main`.
-- The **register** step is automated when you pass `--description=TEXT` to
-  `worktree-start`: it seeds (or updates, with `--force`) the idea's row in
-  `WORKTREES.md`. Without `--description` the registry is left untouched.
-- `worktree-stop` keeps the branch (resume later with `start`); `worktree-rm`
-  deletes it (done forever) and removes the idea's shared venv (recreatable on
-  the next `start`).
+  re-attach; missing -> create off `main`. It writes the idea's `IDEA.md`
+  (Status active).
+- `worktree-stop` keeps the branch (resume later with `start`) and sets Status:
+  parked on full park; `worktree-rm` deletes the branch (done forever) and
+  removes the idea dir, its shared venv, and its `IDEA.md` (all recreatable on
+  the next `start`; history lives in git branches).
 - `worktree-merge` is *coordinated, not transactional*: preflight all repos,
   rebase all branches, then fast-forward all mains. On a phase-1 failure no
   main is merged, but some idea branches may already have been rebased.
@@ -236,41 +230,36 @@ stderr (`activated venv: <path>` / `deactivated venv: <path>`), so the current
 venv is always visible in the terminal history without a prompt indicator.
 (Internal cd round-trips, e.g. during `worktree-start`, are quiet.)
 
-## Registry (`WORKTREES.md`)
+## Idea metadata (`IDEA.md`)
 
-A single **global** registry at `$__wt_worktree_home/WORKTREES.md` (default
-`~/git-worktrees/WORKTREES.md`, alongside `WORKTREE-GROUPS`) — not per-repo.
-One row per **idea** (an idea can span several repos), so `git plan` works from
-any of its worktrees:
+Each idea's metadata lives in `$__wt_worktree_home/<idea>/IDEA.md` — co-located
+with the worktrees, so the idea dir's existence is the registry entry. There is
+no global file to keep in sync. `worktree-start` writes it; `git plan` shows it
+from any of the idea's worktrees:
 
-| Idea | Branch | Repos | Description | Plan file | Status |
-|---|---|---|---|---|---|
-| `bring-in-ramayana-govindaraja` | `bring-in-ramayana-govindaraja` | grantha-data grantha-explorer ramayana | Port Govindaraja's commentary | plans/PLAN_bring-in-ramayana-govindaraja.md | active |
-
-It is **human-maintained, auto-seeded on `worktree-start`**: passing
-`--description=TEXT` appends a new row for the idea (creating the file + header
-when absent) or — with `--force` — overwrites an existing row's Description.
-Without `--description` the registry is never touched. The tooling prints
-reminders at lifecycle boundaries and never edits the Status column (that stays
-yours, as does anything you hand-edit — the auto-seeder only ever writes the
-row's Description). The Status column uses `active | parked | merged |
-abandoned`.
-
-**Schema:** the header must include the `Description` column
-(`| Idea | Branch | Repos | Description | Plan file | Status |`). A pre-existing
-registry that lacks it (old schema) is **auto-migrated in place** on the first
-`--description` run — the column is inserted after `Repos`, existing rows get an
-empty Description cell, and nothing else is touched.
-
-## WORKTREE-GROUPS
-
-```
-default: grantha-data grantha-explorer
-ramayana: grantha-data grantha-explorer ramayana
+```markdown
+# Idea: linebreak-whitespace-normalization
+Status: active
+Repos: grantha-data grantha-explorer
+Description: Normalize devanagari whitespace in the explorer
+Plan: grantha-data/plans/PLAN_DEVANAGARI_TEXT_STYLE.md
 ```
 
-Group names are `[a-z0-9][a-z0-9-]*` (validated; first char must be
-alphanumeric, so no leading dash). Repos are alphabetized on `--save`.
+- **Status** is auto-maintained by the tooling: `worktree-start` → `active`,
+  `worktree-stop` (full park) → `parked`, `worktree-merge` → `merged`.
+- **`Repos`**, **`Description`**, and **`Plan`** are free-form and
+  human-editable. `--description=TEXT` on start sets the Description (an
+  existing different description is overwritten only with `--force`; identical
+  is a no-op).
+- `worktree-rm` removes `IDEA.md` with the idea dir — the history of finished
+  ideas lives in git branches, not here.
+
+## Reusable repo sets
+
+There is no separate group file: a repo set you want to reuse is just an idea
+you've already started — its `IDEA.md` `Repos:` line is the set. To fan out a
+set, pass `--repos=A,B,C` directly, or `worktree-go` an existing idea to reuse
+its worktrees.
 
 ## Known limitations
 

@@ -69,10 +69,9 @@ fi
 
 # -- 1. self-provision the fish config if absent ----------------------------------
 # One-shot `./install.sh` from zero state: configure --defaults writes the config
-# override (default homes) and seeds WORKTREE-GROUPS, but ONLY when the config
-# file does not already exist. If it exists it is never touched, so custom homes
-# are preserved on re-runs. Re-assert afterwards so a failed configure cannot
-# silently continue.
+# override (default homes), but ONLY when the config file does not already exist.
+# If it exists it is never touched, so custom homes are preserved on re-runs.
+# Re-assert afterwards so a failed configure cannot silently continue.
 
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
 CONF_FILE="$CONF_DIR/worktrees-config.fish"
@@ -93,31 +92,20 @@ ln -sf "$REPO_DIR/worktrees.fish" "$CONF_DIR/worktrees.fish"
 echo "symlinked $CONF_DIR/worktrees.fish -> $REPO_DIR/worktrees.fish"
 
 # -- 3. set the git plan alias ------------------------------------------------------
-# Reads the current branch's row from the GLOBAL idea registry
-# ($__wt_worktree_home/WORKTREES.md, alongside WORKTREE-GROUPS) — not a
-# per-repo committed file. The branch column is backtick-delimited; the stored
-# config value must contain `\`` (backslash + backtick) so POSIX sh renders a
-# LITERAL backtick inside double quotes. The single-quoted argument to printf
-# preserves the backslashes verbatim; the path to WORKTREES.md (marked $WT_HOME
-# below) is interpolated at install time from the worktrees-config.fish written
-# by configure.sh, while `$(...)` runs at alias-invocation time.
+# Prints the current worktree's IDEA.md. The idea dir is the parent of the
+# worktree root (`git rev-parse --show-toplevel`), so `git plan` works from any
+# worktree subdirectory and needs no global registry path. From a main clone
+# (toplevel = ~/github/<repo>) the parent has no IDEA.md and the fallback
+# explains. The single-quoted argument to printf preserves `$(...)` and `$I`
+# verbatim; they run at alias-invocation time in POSIX sh.
 # Stored value (for reference):
-#   !grep -F "| \`$(git branch --show-current)\` |" "$WT_HOME/WORKTREES.md" 2>/dev/null || { echo "No WORKTREES.md row for branch: $(git branch --show-current) — add one in $WT_HOME/WORKTREES.md."; git worktree list; }
+#   !I="$(dirname "$(git rev-parse --show-toplevel)")"; test -f "$I/IDEA.md" && cat "$I/IDEA.md" || { echo "No IDEA.md for this worktree ($I) — write one at $I/IDEA.md"; git worktree list; }
 
-CONF_FILE="$CONF_DIR/worktrees-config.fish"
-# Ask fish to evaluate the config so hand-edited quoting/formatting can't break
-# the parse (sed on the exact line would silently fall back).
-WT_HOME=""
-if [[ -f "$CONF_FILE" ]]; then
-    WT_HOME="$(fish -c "source '$CONF_FILE' >/dev/null 2>&1; and echo \"\$__wt_worktree_home\"" 2>/dev/null)"
-fi
-test -n "$WT_HOME" || WT_HOME="$HOME/git-worktrees"
-
-PLAN_ALIAS="$(printf '%s' "!grep -F \"| \\\`\$(git branch --show-current)\\\` |\" \"$WT_HOME/WORKTREES.md\" 2>/dev/null || { echo \"No WORKTREES.md row for branch: \$(git branch --show-current) — add one in $WT_HOME/WORKTREES.md.\"; git worktree list; }")"
+PLAN_ALIAS="$(printf '%s' '!I="$(dirname "$(git rev-parse --show-toplevel)")"; test -f "$I/IDEA.md" && cat "$I/IDEA.md" || { echo "No IDEA.md for this worktree ($I) — write one at $I/IDEA.md"; git worktree list; }')"
 
 git config --global alias.plan "$PLAN_ALIAS"
 
-echo "set git alias: plan (reads $WT_HOME/WORKTREES.md)"
+echo "set git alias: plan (reads the worktree's IDEA.md)"
 
 # -- 4. opencode model-routing install ---------------------------------------------
 # Symlink the alarm plugin into opencode's plugin dir (auto-discovered) and
