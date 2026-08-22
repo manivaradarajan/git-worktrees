@@ -257,8 +257,10 @@ row's Description). The Status column uses `active | parked | merged |
 abandoned`.
 
 **Schema:** the header must include the `Description` column
-(`| Idea | Branch | Repos | Description | Plan file | Status |`). Auto-seeding
-refuses (with a migration hint) on an old-schema registry that lacks it.
+(`| Idea | Branch | Repos | Description | Plan file | Status |`). A pre-existing
+registry that lacks it (old schema) is **auto-migrated in place** on the first
+`--description` run — the column is inserted after `Repos`, existing rows get an
+empty Description cell, and nothing else is touched.
 
 ## WORKTREE-GROUPS
 

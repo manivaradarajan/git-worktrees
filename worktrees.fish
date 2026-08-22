@@ -435,6 +435,60 @@ function __wt_registry_ensure_table
     echo "|---|---|---|---|---|---|" >> $file
 end
 
+# __wt_registry_migrate_description — add the Description column to an
+# old-schema WORKTREES.md (header lacks it), so --description seeding works on
+# a pre-existing registry without hand-editing. Atomic tmp+mv; preserves mode.
+# Only table lines (starting with `|`) are touched: the FIRST table line is the
+# header (insert `Description` after Repos), a separator line (all `-` cells)
+# gets `---` inserted, and every other row gets an empty cell. Non-table lines
+# (title, comments, blanks) pass through untouched. Rows with too few cells to
+# insert into are left as-is. Idempotent: a registry that already has the
+# column is a no-op.
+#
+# Usage:   __wt_registry_migrate_description
+# Exit codes: 0 migrated (or already current); 1 write failure.
+function __wt_registry_migrate_description
+    set -l file (__wt_registry_path)
+    test -f $file; and test -s $file; or return 0
+    __wt_registry_has_description; and return 0
+    set -l tmp (mktemp (dirname $file)/WORKTREES.md.XXXXXX); or return 1
+    set -l mode (stat -f %Lp $file 2>/dev/null)
+    set -l n 0
+    while read -l line
+        if string match -q -- '|*' $line
+            set n (math $n + 1)
+            set -l cells (__wt_registry_cells $line)
+            if test (count $cells) -lt 3
+                echo $line
+                continue
+            end
+            set -l insert ""
+            if test $n -eq 1
+                set insert Description   # header
+            else
+                set -l all_dashes 1
+                for c in $cells
+                    string match -q -r -- '^-+$' $c; or set all_dashes 0
+                end
+                if test $all_dashes -eq 1
+                    set insert ---   # separator
+                end
+            end
+            set -l out $cells[1..3]
+            set -a out $insert
+            set -a out $cells[4..-1]
+            echo "| "(string join -- ' | ' $out)" |"
+        else
+            echo $line
+        end
+    end < $file > $tmp
+    if test -n "$mode"
+        chmod $mode $tmp
+    end
+    mv $tmp $file
+    echo "WORKTREES.md migrated to add the Description column" >&2
+end
+
 # __wt_registry_append_row — append a row for a NEW idea. Refuses if any row
 # already exists for the idea (belt-and-braces: callers gate on preflight, but
 # a duplicate here would corrupt the registry). <description> may be empty.
@@ -523,12 +577,12 @@ function __wt_registry_rewrite_row
 end
 
 # __wt_registry_preflight — phase-0 check (before anything is created): can
-# this start invocation write the registry? Errors on an old-schema header
-# (no Description column) or a conflicting existing description without
-# --force. No mutation.
+# this start invocation write the registry? Auto-migrates an old-schema header
+# (missing the Description column) in place, and errors on a conflicting
+# existing description without --force. No other mutation.
 #
 # Usage:   __wt_registry_preflight [--force] <idea> <description>
-# Exit codes: 0 writable or no-op; 1 schema error / description conflict.
+# Exit codes: 0 writable or no-op; 1 schema migration failed / description conflict.
 function __wt_registry_preflight
     argparse 'f/force' -- $argv; or return 1
     set -l idea $argv[1]
@@ -536,10 +590,9 @@ function __wt_registry_preflight
     set -l file (__wt_registry_path)
     test -f $file; and test -s $file; or return 0   # nothing yet -> append is fine
     if not __wt_registry_has_description
-        echo "WORKTREES.md at $file has no 'Description' column — add" >&2
-        echo "  | Idea | Branch | Repos | Description | Plan file | Status |" >&2
-        echo "to the header (or drop --description)" >&2
-        return 1
+        # old-schema registry (pre-Description column): migrate it in place so
+        # --description works on an existing registry without hand-editing.
+        __wt_registry_migrate_description; or return 1
     end
     set -l row (__wt_registry_row $idea)
     test -n "$row"; or return 0   # no row -> append is fine

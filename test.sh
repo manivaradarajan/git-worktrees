@@ -10,7 +10,8 @@
 # merge / stop+resume / rm / shared python venv (union resolution, auto-activation,
 # pip fallback, python3 fast-fail) / repo-local .venv auto-activation (incl. the
 # inherited-PATH clobber regression) / JS deps / any-directory invocation /
-# description registry seeding / interactive prompting (idea/repos/description,
+# description registry seeding (incl. old-schema auto-migration + idempotency) /
+# interactive prompting (idea/repos/description,
 # --save prompt, lifecycle idea prompts, --help) / environment fast-fail guards.
 # Interactive tests use run_fish_in (pipes answers + __wt_force_prompt); every
 # other test runs with stdin pinned to /dev/null (non-interactive).
@@ -609,16 +610,29 @@ run_fish "pipe in description rejected before creating anything" '
     not test -d "$__wt_worktree_home/idea-seed3/repo-a"; or exit 1
 '
 
-run_fish "old-schema registry errors with a migration hint" '
+run_fish "old-schema registry auto-migrates and seeds" '
     mkdir -p "$WORK/oldschema"
-    printf "# Worktrees\n\n| Idea | Branch | Repos | Plan file | Status |\n|---|\n" > "$WORK/oldschema/WORKTREES.md"
+    printf "# Worktrees\n\n| Idea | Branch | Repos | Plan file | Status |\n|---|---|---|---|---|\n| \`existing-idea\` | \`existing-idea\` | repo-a | a plan | active |\n" > "$WORK/oldschema/WORKTREES.md"
     set -l saved $__wt_worktree_home
     set -g __wt_worktree_home "$WORK/oldschema"
     cd "$__wt_github_home/repo-a"
-    set -l out (worktree-start --repos=repo-a --description="x" idea-old 2>&1)
-    test $status -eq 1; or exit 1
-    string match -q "*Description*" "$out"; or exit 1
-    not test -d "$WORK/oldschema/idea-old"; or exit 1
+    worktree-start --repos=repo-a --description="x" idea-old >/dev/null 2>&1; or exit 1
+    string match -q "*| Idea | Branch | Repos | Description | Plan file | Status |*" (cat "$WORK/oldschema/WORKTREES.md"); or exit 1
+    string match -q "*idea-old*x*active*" (cat "$WORK/oldschema/WORKTREES.md"); or exit 1
+    string match -q "*existing-idea*active*" (cat "$WORK/oldschema/WORKTREES.md"); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "registry migration is idempotent and preserves existing rows" '
+    mkdir -p "$WORK/migidem"
+    printf "# Worktrees\n\n| Idea | Branch | Repos | Plan file | Status |\n|---|---|---|---|---|\n| \`existing-idea\` | \`existing-idea\` | repo-a | a plan | active |\n" > "$WORK/migidem/WORKTREES.md"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/migidem"
+    __wt_registry_migrate_description; or exit 1
+    cp "$WORK/migidem/WORKTREES.md" "$WORK/migidem/before.md"
+    __wt_registry_migrate_description; or exit 1
+    cmp -s "$WORK/migidem/WORKTREES.md" "$WORK/migidem/before.md"; or exit 1
+    string match -q "*existing-idea*repo-a*active*" (cat "$WORK/migidem/WORKTREES.md"); or exit 1
     set -g __wt_worktree_home $saved
 '
 
