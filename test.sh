@@ -9,7 +9,11 @@
 # invalid idea / bogus destination / go / git plan / merge refusals / coordinated
 # merge / stop+resume / rm / shared python venv (union resolution, auto-activation,
 # pip fallback, python3 fast-fail) / repo-local .venv auto-activation (incl. the
-# inherited-PATH clobber regression) / JS deps / environment fast-fail guards.
+# inherited-PATH clobber regression) / JS deps / any-directory invocation /
+# description registry seeding / interactive prompting (idea/repos/description,
+# --save prompt, lifecycle idea prompts, --help) / environment fast-fail guards.
+# Interactive tests use run_fish_in (pipes answers + __wt_force_prompt); every
+# other test runs with stdin pinned to /dev/null (non-interactive).
 # All installs are offline (manifests are dependency-free); the `.python-version`
 # pin tests additionally require `uv` and a local non-3.13 interpreter (or are
 # skipped).
@@ -35,9 +39,12 @@ ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 fail() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
 
 # run_fish <label> <script> — run fish with the tooling loaded and a temp HOME.
-# The trailing `exit 0` makes the overall rc deterministic: any mid-script
-# `exit 1` still aborts, but an assertion that correctly fails (e.g. a command
-# that must fail) no longer leaks its nonzero status into the final rc.
+# stdin is pinned to /dev/null so the fish process is always NON-interactive:
+# otherwise running ./test.sh from a terminal would make the harness a tty and
+# every no-flags command would block on a prompt. The trailing `exit 0` makes
+# the overall rc deterministic: any mid-script `exit 1` still aborts, but an
+# assertion that correctly fails (e.g. a command that must fail) no longer
+# leaks its nonzero status into the final rc.
 run_fish() {
     local label="$1" script="$2"
     local out
@@ -46,6 +53,32 @@ run_fish() {
         for v in VIRTUAL_ENV VIRTUAL_ENV_PROMPT _OLD_VIRTUAL_PATH _OLD_VIRTUAL_PYTHONHOME _OLD_FISH_PROMPT_OVERRIDE
             set -q \$v; and set -e \$v
         end
+        source \$XDG_CONFIG_HOME/fish/conf.d/worktrees-config.fish
+        source \$XDG_CONFIG_HOME/fish/conf.d/worktrees.fish
+        $script
+        exit 0
+    " 2>&1 </dev/null)"
+    local rc=$?
+    if [ $rc -eq 0 ]; then ok "$label"; else
+        fail "$label (rc=$rc)"
+        printf '      %s\n' "$out" | sed 's/^/        /'
+    fi
+}
+
+# run_fish_in <label> <stdin> <script> — like run_fish, but feeds `<stdin>`
+# lines to the fish process and forces interactive prompting (`__wt_force_prompt
+# 1`, the documented test hook) so the prompt tests can drive idea/repos/
+# description answers deterministically from a pipe. Reads past the pipe get EOF
+# (empty), so each prompt test must supply at least as many lines as prompts.
+run_fish_in() {
+    local label="$1" stdin="$2" script="$3"
+    local out
+    out="$(printf '%s\n' "$stdin" | HOME="$WORK/home" fish -c "
+        set -gx XDG_CONFIG_HOME \"\$HOME/.config\"
+        for v in VIRTUAL_ENV VIRTUAL_ENV_PROMPT _OLD_VIRTUAL_PATH _OLD_VIRTUAL_PYTHONHOME _OLD_FISH_PROMPT_OVERRIDE
+            set -q \$v; and set -e \$v
+        end
+        set -g __wt_force_prompt 1
         source \$XDG_CONFIG_HOME/fish/conf.d/worktrees-config.fish
         source \$XDG_CONFIG_HOME/fish/conf.d/worktrees.fish
         $script
@@ -175,9 +208,9 @@ mkdir -p "$WT_HOME"
 cat > "$WT_HOME/WORKTREES.md" <<EOF
 # Worktrees
 
-| Idea | Branch | Repos | Plan file | Status |
-|---|---|---|---|---|
-| \`idea-one\` | \`idea-one\` | repo-a | Test idea one | active |
+| Idea | Branch | Repos | Description | Plan file | Status |
+|---|---|---|---|---|---|
+| \`idea-one\` | \`idea-one\` | repo-a | Test idea | Test idea one | active |
 EOF
 
 # configure (answer defaults) + install — fail loudly, don't cascade
@@ -505,6 +538,275 @@ run_fish "toggle off disables repo .venv auto-activation" '
     set -g __wt_auto_repo_venv 1
     cd "$__wt_github_home/repo-a"
     string match -q "*/repo-a/.venv" "$VIRTUAL_ENV"; or exit 1
+'
+
+echo "== any-directory invocation =="
+
+run_fish "start from a neutral dir with --repos + --description" '
+    cd "$WORK/home"
+    worktree-start --repos=repo-a,repo-b --description="neutral idea" idea-anydir >/dev/null 2>&1; or exit 1
+    test -d "$__wt_worktree_home/idea-anydir/repo-a"; or exit 1
+    test -d "$__wt_worktree_home/idea-anydir/repo-b"; or exit 1
+    string match -r "idea-anydir.*neutral idea" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+'
+
+run_fish "neutral dir, no flags, non-interactive errors with a --repos hint" '
+    cd "$WORK/home"
+    set -l out (worktree-start idea-none 2>&1)
+    test $status -eq 1; or exit 1
+    string match -q "*--repos*" "$out"; or exit 1
+'
+
+run_fish "merge/stop/rm with explicit repos from a neutral dir" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a,repo-b idea-nrm >/dev/null 2>&1; or exit 1
+    cd "$WORK/home"
+    worktree-merge --repos=repo-a,repo-b idea-nrm >/dev/null 2>&1; or exit 1
+    worktree-stop --repos=repo-a,repo-b idea-nrm >/dev/null 2>&1; or exit 1
+    not test -d "$__wt_worktree_home/idea-nrm/repo-a"; or exit 1
+    not test -d "$__wt_worktree_home/idea-nrm/repo-b"; or exit 1
+'
+
+run_fish "non-interactive missing idea is a usage error" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start >/dev/null 2>&1; and exit 1
+    worktree-merge >/dev/null 2>&1; and exit 1
+    worktree-stop >/dev/null 2>&1; and exit 1
+    worktree-rm >/dev/null 2>&1; and exit 1
+    worktree-venv >/dev/null 2>&1; and exit 1
+'
+
+echo "== description registry seeding =="
+
+run_fish "description seeds a new registry row" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a --description="seed description" idea-seed >/dev/null 2>&1; or exit 1
+    string match -r "idea-seed.*seed description" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+'
+
+run_fish "conflicting description without --force errors" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a --description="first" idea-seed2 >/dev/null 2>&1; or exit 1
+    worktree-start --repos=repo-a --description="different" idea-seed2 >/dev/null 2>&1; and exit 1
+    string match -r "idea-seed2.*first" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+'
+
+run_fish "--force overwrites an existing description" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --force --repos=repo-a --description="second" idea-seed2 >/dev/null 2>&1; or exit 1
+    string match -r "idea-seed2.*second" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+    not string match -q -r "idea-seed2.*first" "$__wt_worktree_home/WORKTREES.md"; or exit 1
+'
+
+run_fish "identical description is a no-op" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a --description="second" idea-seed2 >/dev/null 2>&1; or exit 1
+'
+
+run_fish "pipe in description rejected before creating anything" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a --description="bad|desc" idea-seed3 >/dev/null 2>&1; and exit 1
+    not test -d "$__wt_worktree_home/idea-seed3/repo-a"; or exit 1
+'
+
+run_fish "old-schema registry errors with a migration hint" '
+    mkdir -p "$WORK/oldschema"
+    printf "# Worktrees\n\n| Idea | Branch | Repos | Plan file | Status |\n|---|\n" > "$WORK/oldschema/WORKTREES.md"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/oldschema"
+    cd "$__wt_github_home/repo-a"
+    set -l out (worktree-start --repos=repo-a --description="x" idea-old 2>&1)
+    test $status -eq 1; or exit 1
+    string match -q "*Description*" "$out"; or exit 1
+    not test -d "$WORK/oldschema/idea-old"; or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "missing registry is created with header and row" '
+    mkdir -p "$WORK/noreg"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/noreg"
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a --description="fresh idea" idea-fresh >/dev/null 2>&1; or exit 1
+    test -f "$WORK/noreg/WORKTREES.md"; or exit 1
+    string match -q "*| Description |*" (cat "$WORK/noreg/WORKTREES.md"); or exit 1
+    string match -r "idea-fresh.*fresh idea" (cat "$WORK/noreg/WORKTREES.md"); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+echo "== registry layer unit tests =="
+
+run_fish "append refuses a duplicate row" '
+    mkdir -p "$WORK/regunit"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit"
+    __wt_registry_ensure_table; or exit 1
+    __wt_registry_append_row idea-x "one" repo-a; or exit 1
+    __wt_registry_append_row idea-x "two" repo-a 2>/dev/null; and exit 1
+    test (count (__wt_registry_row_count idea-x)) = 1; or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "rewrite updates only the description cell, preserves the rest" '
+    mkdir -p "$WORK/regunit2"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit2"
+    __wt_registry_append_row idea-x "one" repo-a repo-b; or exit 1
+    __wt_registry_rewrite_row idea-x "two"; or exit 1
+    set -l row (__wt_registry_row idea-x)
+    string match -q "*two*" "$row"; or exit 1
+    not string match -q "*one*" "$row"; or exit 1
+    string match -q "*repo-a repo-b*" "$row"; or exit 1
+    string match -q "*active*" "$row"; or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "strict branch match ignores same-name occurrence in description" '
+    mkdir -p "$WORK/regunit3"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit3"
+    printf "# Worktrees\n\n| Idea | Branch | Repos | Description | Plan file | Status |\n|---|---|---|---|---|---|\n| `idea-x` | `idea-x` | repo-a | mentions `idea-other` |  | active |\n" > "$WORK/regunit3/WORKTREES.md"
+    not __wt_registry_is_idea_row idea-other "| `idea-x` | `idea-x` | repo-a | mentions `idea-other` |  | active |"; or exit 1
+    test -n (__wt_registry_row idea-x); or exit 1
+    test -z (__wt_registry_row idea-other); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "write refuses duplicate rows (corruption guard)" '
+    mkdir -p "$WORK/regunit4"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit4"
+    printf "# Worktrees\n\n| Idea | Branch | Repos | Description | Plan file | Status |\n|---|---|---|---|---|---|\n| `idea-x` | `idea-x` | repo-a | one |  | active |\n| `idea-x` | `idea-x` | repo-a | two |  | active |\n" > "$WORK/regunit4/WORKTREES.md"
+    __wt_registry_write idea-x "new" repo-a 2>/dev/null; and exit 1
+    string match -q "*one*" (cat "$WORK/regunit4/WORKTREES.md"); or exit 1
+    string match -q "*two*" (cat "$WORK/regunit4/WORKTREES.md"); or exit 1
+    not string match -q "*new*" (cat "$WORK/regunit4/WORKTREES.md"); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "rewrite zero-match fails without touching the file" '
+    mkdir -p "$WORK/regunit5"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit5"
+    __wt_registry_ensure_table; or exit 1
+    __wt_registry_rewrite_row ghost "x" 2>/dev/null; and exit 1
+    test -f "$WORK/regunit5/WORKTREES.md"; or exit 1
+    not string match -q "*ghost*" (cat "$WORK/regunit5/WORKTREES.md"); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+run_fish "ensure_table leaves a non-empty registry untouched" '
+    mkdir -p "$WORK/regunit6"
+    set -l saved $__wt_worktree_home
+    set -g __wt_worktree_home "$WORK/regunit6"
+    echo "# custom title" > "$WORK/regunit6/WORKTREES.md"
+    echo "keep me" >> "$WORK/regunit6/WORKTREES.md"
+    __wt_registry_ensure_table; or exit 1
+    string match -q "*custom title*" (cat "$WORK/regunit6/WORKTREES.md"); or exit 1
+    string match -q "*keep me*" (cat "$WORK/regunit6/WORKTREES.md"); or exit 1
+    not string match -q "| Idea |" (cat "$WORK/regunit6/WORKTREES.md"); or exit 1
+    set -g __wt_worktree_home $saved
+'
+
+echo "== interactive prompting =="
+
+run_fish_in "start prompts for idea, repos, description" '
+    prompt-idea
+    repo-a repo-b
+    a described idea
+' '
+    cd "$__wt_github_home/repo-a"
+    worktree-start >/dev/null 2>&1; or exit 1
+    test (basename (pwd)) = repo-a; or exit 1
+    test (basename (dirname (pwd))) = prompt-idea; or exit 1
+    test -d "$__wt_worktree_home/prompt-idea/repo-b"; or exit 1
+    string match -r "prompt-idea.*a described idea" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+'
+
+run_fish_in "repos prompt defaults to current repo" '
+    prompt-default
+
+    defaulted
+' '
+    cd "$__wt_github_home/repo-a"
+    worktree-start >/dev/null 2>&1; or exit 1
+    test -d "$__wt_worktree_home/prompt-default/repo-a"; or exit 1
+    not test -d "$__wt_worktree_home/prompt-default/repo-b"; or exit 1
+    string match -r "prompt-default.*defaulted" (cat "$__wt_worktree_home/WORKTREES.md"); or exit 1
+'
+
+run_fish_in "--save without --repos prompts and persists the set" '
+    prompt-save
+    repo-a repo-b
+    saved idea
+' '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --save promptsave >/dev/null 2>&1; or exit 1
+    set -l repos (__wt_read_group promptsave)
+    contains -- repo-a $repos; or exit 1
+    contains -- repo-b $repos; or exit 1
+'
+
+run_fish "seed idea-lc for lifecycle prompt tests" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a,repo-b idea-lc >/dev/null 2>&1; or exit 1
+'
+
+run_fish_in "merge prompts for a missing idea (derive repos from worktrees)" '
+    idea-lc
+' '
+    cd "$WORK/home"
+    worktree-merge >/dev/null 2>&1; or exit 1
+'
+
+run_fish_in "rm prompts for a missing idea (derive repos from worktrees)" '
+    idea-lc
+    y
+    y
+' '
+    cd "$WORK/home"
+    worktree-rm >/dev/null 2>&1; or exit 1
+    not test -d "$__wt_worktree_home/idea-lc/repo-a"; or exit 1
+    not test -d "$__wt_worktree_home/idea-lc/repo-b"; or exit 1
+    not git -C "$__wt_github_home/repo-a" branch --list idea-lc | string match -q "*idea-lc"; or exit 1
+'
+
+run_fish "seed idea-sp for stop prompt test" '
+    cd "$__wt_github_home/repo-a"
+    worktree-start --repos=repo-a idea-sp >/dev/null 2>&1; or exit 1
+'
+
+run_fish_in "stop prompts for a missing idea (derive repos from worktrees)" '
+    idea-sp
+' '
+    cd "$WORK/home"
+    worktree-stop >/dev/null 2>&1; or exit 1
+    not test -d "$__wt_worktree_home/idea-sp/repo-a"; or exit 1
+    git -C "$__wt_github_home/repo-a" branch --list idea-sp | string match -q "*idea-sp"; or exit 1
+'
+
+run_fish "seed idea-vp for venv prompt test" '
+    cd "$__wt_github_home/repo-req"
+    worktree-start --repos=repo-req idea-vp >/dev/null 2>&1; or exit 1
+'
+
+run_fish_in "venv prompts for idea and repos" '
+    idea-vp
+    repo-req
+' '
+    cd "$WORK/home"
+    set -l out (worktree-venv 2>/dev/null)
+    string match -q "*idea-vp" $out; or exit 1
+'
+
+run_fish "--help prints usage and exits 0 from any directory" '
+    cd "$WORK/home"
+    worktree-start --help >/dev/null 2>&1; or exit 1
+    worktree-start -h >/dev/null 2>&1; or exit 1
+    worktree-merge --help >/dev/null 2>&1; or exit 1
+    worktree-stop --help >/dev/null 2>&1; or exit 1
+    worktree-rm --help >/dev/null 2>&1; or exit 1
+    worktree-venv --help >/dev/null 2>&1; or exit 1
 '
 
 echo "== environment fast-fail =="
